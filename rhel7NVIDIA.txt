@@ -1,0 +1,53 @@
+# Steps to install NVIDIA Driver on Red Hat 7
+Step 1: Install dependancies
+# Pull from YUM Repo
+yum install -y gcc make kernel-headers kernel-devel acpid libglvnd-glx libglvnd-opengl libglvnd-devel pkgconfig
+
+Step 2: Edit file: /etc/default/grub
+## Fetch template file from Web Server
+Example From:
+GRUB_CMDLINE_LINUX="crashkernel=auto rd.lvm.lv=rhel_rh98/root rd.lvm.lv=rhel_rh98/swap rhgb quiet"
+Example To:
+GRUB_CMDLINE_LINUX="crashkernel=auto rd.lvm.lv=rhel_rh98/root rd.lvm.lv=rhel_rh98/swap rhgb quiet rd.driver.blacklist=nouveau modprobe.blacklist=nouveau"
+
+Step 3:
+create file: /etc/modprobe.d/blacklist-nouveau.conf
+## Fetch template file from Web Server
+## Using a secondary configuration file will stop updates from changing blacklist.conf.
+Add contents:
+blacklist nouveau
+options nouveau modeset=0
+
+Step 4: Rebuild GRUB configurations
+# Rebuild BIOS GRUB2 Config
+grub2-mkconfig -o /boot/grub2/grub.cfg
+# Rebuild UEFI GRUB2 Config
+grub2-mkconfig -o /boot/efi/EFI/redhat/grub.cfg
+
+Step 5: Backup initramfs (ramdisk)
+# Create backup
+mv /boot/initramfs-$(uname -r).img /boot/initramfs-$(uname -r)-nouveau.img
+
+Step 6: Build new initramfs (ramdisk)
+# Build new initramfs
+dracut /boot/initramfs-$(uname -r).img $(uname -r)
+
+Step 7: Drop to init 3
+init 3
+
+Step 8: Run Driver install file
+# Note: This file may be corrupt from the vendor, check your hashes!
+sh NVIDIA-Linux-x86_64-470.74.run --add-this-kernel
+## Fetch custom.run file from Web Server and execute; add-this-kernel can performed on a reference machine.
+./NVIDIA-Linux-x86_64-470.74-custom.run
+
+Step 9: Build new initramfs (ramdisk)
+# Build new initramfs
+dracut /boot/initramfs-$(uname -r).img $(uname -r)
+
+Step 10: Reboot
+reboot
+
+Step 11: Verify Install with lsmod | grep nvidia
+lsmod | grep nvidia
+
