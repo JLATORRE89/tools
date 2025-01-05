@@ -1,0 +1,95 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>IRS 20-Factor Test for Independent Contractors</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            line-height: 1.6;
+            margin: 20px;
+        }
+        h1, h2 {
+            color: #333;
+        }
+        ul {
+            list-style-type: disc;
+            margin-left: 20px;
+        }
+        .factor-list {
+            margin-top: 20px;
+        }
+        .factor-item {
+            margin-bottom: 15px;
+        }
+        .factor-item label {
+            display: block;
+            margin-top: 5px;
+        }
+        #print-button {
+            margin-top: 20px;
+            display: none;
+            padding: 10px 15px;
+            background-color: #007bff;
+            color: white;
+            border: none;
+            cursor: pointer;
+            border-radius: 5px;
+        }
+        #print-button:hover {
+            background-color: #0056b3;
+        }
+        footer {
+            margin-top: 30px;
+            font-size: 0.9em;
+            color: #555;
+        }
+    </style>
+    <script>
+        function checkCompletion() {
+            const radios = document.querySelectorAll('input[type="radio"]');
+            const totalRadios = radios.length;
+            const checkedRadios = Array.from(radios).filter(radio => radio.checked).length;
+
+            const printButton = document.getElementById('print-button');
+            if (checkedRadios === totalRadios / 2) { // Assuming 2 options (yes/no) per question
+                printButton.style.display = 'block';
+            } else {
+                printButton.style.display = 'none';
+            }
+        }
+
+        function printPage() {
+            window.print();
+        }
+    </script>
+</head>
+<body>
+    <h1>IRS 20-Factor Test for Independent Contractors</h1>
+    <p>An independent contractor is a worker who individually contracts with an employer to provide specialized or requested services on an as-needed or project basis...</p>
+
+    <h2>IRS 20-Factor Test</h2>
+    <div class="factor-list">
+        <div class="factor-item">
+            <strong>1. Instructions</strong>
+            <p>Is the worker required to comply with the employer’s instructions about when, where, and how to work?</p>
+            <label><input type="radio" name="factor1" value="yes" onclick="checkCompletion()"> Yes</label>
+            <label><input type="radio" name="factor1" value="no" onclick="checkCompletion()"> No</label>
+        </div>
+        <div class="factor-item">
+            <strong>2. Training</strong>
+            <p>Is training required? Does the worker receive training from or at the direction of the employer?</p>
+            <label><input type="radio" name="factor2" value="yes" onclick="checkCompletion()"> Yes</label>
+            <label><input type="radio" name="factor2" value="no" onclick="checkCompletion()"> No</label>
+        </div>
+        <!-- Additional questions go here in similar structure -->
+    </div>
+
+    <button id="print-button" onclick="printPage()">Print</button>
+
+    <footer>
+        <p>Source: <a href="https://www.regent.edu/admin/busoff/pdf/20-questions1099test.pdf" target="_blank">IRS 20-Factor Test for Independent Contractors</a></p>
+    </footer>
+</body>
+</html>
