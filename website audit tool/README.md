@@ -1,4 +1,3 @@
-
 # 🌐 Website Audit Tool
 
 The **Website Audit Tool** is a lightweight but powerful Python-based auditing utility designed to help webmasters, developers, and security-conscious users evaluate the security and compliance of any public-facing website.
@@ -50,24 +49,17 @@ This tool is a fast and scriptable way to:
 
 ### ⚙️ Setup Instructions
 
-1. **Clone**:
-## 📦 Download or Clone
+1. **Download or Clone the Repository**
 
-You can download the latest version or clone it directly:
+   🔗 GitHub Repository:  
+   https://github.com/JLATORRE89/tools/tree/master/website%20audit%20tool
 
-### 🔗 GitHub Repository
+   ```bash
+   git clone https://github.com/JLATORRE89/tools.git
+   cd "tools/website audit tool"
+   ```
 
-**🔧 Website Audit Tool GitHub Repo**  
-https://github.com/JLATORRE89/tools/tree/master/website%20audit%20tool
-
-### 📥 Clone via Git
-
-```bash
-git clone https://github.com/JLATORRE89/tools.git
-cd "tools/website audit tool"
-pip install -r requirements.txt
-python site_audit.py https://example.com
-2. **Install dependencies**:
+2. **Install Dependencies**
 
    ```bash
    pip install -r requirements.txt
@@ -79,7 +71,7 @@ python site_audit.py https://example.com
    run_audit.bat
    ```
 
-3. (Optional) Install Lighthouse globally:
+3. (Optional) **Install Lighthouse**
 
    ```bash
    npm install -g lighthouse
@@ -128,7 +120,7 @@ python site_audit.py input.txt output.json output.csv
 ## 📁 File Structure
 
 ```
-site_audit_tool_final/
+website audit tool/
 ├── site_audit.py           # Main audit tool
 ├── requirements.txt        # Python dependencies
 ├── run_audit.bat           # Windows launcher
