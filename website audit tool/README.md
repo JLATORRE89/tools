@@ -1,6 +1,3 @@
-Here is a detailed `README.md` for the **Website Audit Tool**:
-
----
 
 ````markdown
 # 🌐 Website Audit Tool
