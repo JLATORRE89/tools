@@ -1,5 +1,4 @@
 
-````markdown
 # 🌐 Website Audit Tool
 
 The **Website Audit Tool** is a lightweight but powerful Python-based auditing utility designed to help webmasters, developers, and security-conscious users evaluate the security and compliance of any public-facing website.
@@ -150,6 +149,3 @@ site_audit_tool_final/
 ## 🛡️ Disclaimer
 
 This tool is for educational and diagnostic purposes only. It performs non-intrusive HTTP/HTTPS requests but does not exploit or access any restricted resources.
-
-
-```
