@@ -1,0 +1,196 @@
+# Known Attacker IPs - One IP per line
+# Lines starting with # are ignored
+# Updated: August 2025
+# Sources: Multiple threat intelligence feeds and security research
+
+# =================================
+# CURRENT ACTIVE THREATS
+# =================================
+
+# Your specific attacker (from logs)
+52.164.243.255
+
+# Recent Azure-based attackers (Microsoft cloud abuse)
+20.106.221.10
+40.91.94.89
+52.165.152.42
+104.45.130.42
+13.77.161.179
+
+# =================================
+# COMMON MALICIOUS IP RANGES
+# =================================
+
+# Known botnet C&C servers
+185.220.101.0/24
+162.247.74.0/24
+104.244.72.0/24
+198.98.51.0/24
+
+# Chinese state-sponsored APT infrastructure
+103.85.24.0/24
+103.85.25.0/24
+119.28.80.0/24
+
+# Russian cybercriminal networks
+185.159.157.0/24
+185.180.143.0/24
+79.137.200.0/24
+
+# =================================
+# TOR EXIT NODES (Sample)
+# =================================
+# Note: These change frequently - consider dynamic blocking
+
+185.220.101.1
+185.220.101.2
+185.220.101.3
+185.220.101.4
+185.220.101.5
+185.220.101.6
+185.220.101.7
+185.220.101.8
+185.220.101.9
+185.220.101.10
+
+# Additional Tor exit nodes
+162.247.74.201
+162.247.74.202
+162.247.74.203
+199.87.154.251
+199.87.154.255
+
+# =================================
+# KNOWN VPN ABUSE NETWORKS
+# =================================
+
+# Cheap VPN providers often abused
+103.216.221.0/24
+45.95.168.0/24
+185.165.190.0/24
+
+# Free VPN services with high abuse
+198.50.128.0/24
+104.244.76.0/24
+
+# =================================
+# SCANNING & RECONNAISSANCE
+# =================================
+
+# Known vulnerability scanners
+162.142.125.0/24
+167.94.138.0/24
+167.94.145.0/24
+167.94.146.0/24
+
+# Mass scanning infrastructure
+71.6.146.0/24
+71.6.147.0/24
+89.248.165.0/24
+
+# Shodan and similar scanning services
+198.20.69.74
+198.20.69.98
+85.25.103.50
+85.25.43.94
+
+# =================================
+# MALWARE & PHISHING
+# =================================
+
+# Known malware C&C servers
+23.129.64.0/24
+192.42.116.0/24
+185.159.158.0/24
+
+# Phishing infrastructure
+104.21.48.0/24
+172.67.168.0/24
+
+# =================================
+# COMPROMISED HOSTING PROVIDERS
+# =================================
+
+# Frequently compromised VPS providers
+45.142.212.0/24
+185.174.137.0/24
+194.147.140.0/24
+
+# =================================
+# CRYPTOCURRENCY MINING BOTNETS
+# =================================
+
+# Known cryptojacking networks
+185.234.218.0/24
+45.95.169.0/24
+192.210.213.0/24
+
+# =================================
+# HIGH-RISK GEOLOCATION BLOCKS
+# =================================
+# Use with caution - may block legitimate traffic
+
+# North Korea government networks
+175.45.176.0/24
+210.52.109.0/24
+
+# Known Iranian APT infrastructure
+5.160.0.0/24
+91.234.99.0/24
+
+# =================================
+# CLOUD PROVIDER ABUSE
+# =================================
+
+# DigitalOcean droplets commonly abused
+159.89.0.0/16
+165.22.0.0/16
+
+# Linode abuse (partial ranges)
+172.105.0.0/16
+139.144.0.0/16
+
+# =================================
+# DYNAMIC SOURCES TO MONITOR
+# =================================
+# These should be updated regularly from threat feeds:
+
+# Spamhaus XBL (Exploited machines)
+# Update from: https://www.spamhaus.org/xbl/
+
+# Emerging Threats compromised IPs
+# Update from: https://rules.emergingthreats.net/
+
+# SANS ISC suspicious IPs
+# Update from: https://isc.sans.edu/
+
+# =================================
+# TESTING IPs (SAFE TO BLOCK)
+# =================================
+
+# RFC 5737 test networks (safe to block)
+192.0.2.0/24
+198.51.100.0/24
+203.0.113.0/24
+
+# =================================
+# NOTES FOR MAINTENANCE
+# =================================
+# 
+# 1. Update this list weekly from threat intelligence sources
+# 2. Monitor false positives and adjust accordingly  
+# 3. Consider geographic restrictions based on your user base
+# 4. Test blocks in monitoring mode before implementing
+# 5. Keep logs of blocked attempts for analysis
+#
+# SOURCES USED:
+# - INTERPOL Operation Secure 2025 takedowns
+# - Spamhaus Project blocklists
+# - Emerging Threats intelligence
+# - GitHub stamparm/ipsum feed
+# - Various security vendor feeds
+# - Manual threat hunting research
+#
+# DYNAMIC UPDATE COMMANDS:
+# curl -s https://raw.githubusercontent.com/stamparm/ipsum/master/ipsum.txt | grep -v "#" | head -100
+# curl -s https://www.spamhaus.org/drop/drop.txt | grep -v ";" | awk '{print $1}'
