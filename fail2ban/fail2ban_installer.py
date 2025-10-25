@@ -12,6 +12,7 @@ import socket
 import time
 import requests
 from pathlib import Path
+import ipaddress
 from urllib.parse import urlparse
 
 class Fail2BanInstaller:
@@ -20,7 +21,7 @@ class Fail2BanInstaller:
         self.log_file = "/var/log/fail2ban-installer.log"
         self.nginx_logs = ["/var/log/nginx/access.log", "/var/log/nginx/error.log"]
         self.apache_logs = ["/var/log/apache2/access.log", "/var/log/apache2/error.log"]
-        self.ip_file = "ip.txt"
+        self.ip_file = str(self.config_dir / "ip.txt")
         self.temp_ip_file = "/tmp/updated_ips.txt"
         self.default_ip_url = self.get_update_url_from_file()
         
@@ -125,20 +126,20 @@ class Fail2BanInstaller:
         """Download ip.txt file from webserver"""
         if not url:
             url = self.default_ip_url
-        
+
         if interactive:
             print("\n=== Download IP Blacklist ===")
             download_choice = input(f"Download ip.txt from webserver? (y/n) [default: y]: ").lower()
             if download_choice and download_choice != 'y':
                 self.log("IP file download skipped by user")
                 return True
-            
+
             custom_url = input(f"Enter custom URL (or press Enter for default):\n[{url}]: ").strip()
             if custom_url:
                 url = custom_url
-        
+
         self.log(f"Downloading IP blacklist from: {url}")
-        
+
         # Backup existing file if it exists
         if os.path.exists(self.ip_file):
             backup_file = f"{self.ip_file}.backup.{int(time.time())}"
@@ -147,7 +148,7 @@ class Fail2BanInstaller:
                 self.log(f"Backed up existing IP file to: {backup_file}")
             except Exception as e:
                 self.log(f"Failed to backup existing IP file: {str(e)}", "WARNING")
-        
+
         # Download the file
         success, content = self.download_url(url, "IP blacklist file")
         if not success:
@@ -159,119 +160,116 @@ class Fail2BanInstaller:
                 self.log("No IP file available - will create minimal list", "WARNING")
                 self.create_minimal_ip_file()
                 return True
-        
+
         # Validate and save the downloaded content
         try:
-            # Count valid IPs
             valid_ips = 0
-            lines = content.split('\n')
-            for line in lines:
-                line = line.strip()
-                if line and not line.startswith('#'):
-                    if self.validate_ip(line):
-                        valid_ips += 1
-            
+            for line_num, raw_line in enumerate(content.splitlines(), 1):
+                line = raw_line.strip()
+                if not line or line.startswith('#'):
+                    continue
+                if self.validate_ip(line) or self.validate_ipv6(line):
+                    valid_ips += 1
+                else:
+                    self.log(f"Invalid IP/CIDR format on line {line_num}: {line}", "WARNING")
+
             if valid_ips == 0:
                 self.log("Downloaded file contains no valid IPs", "ERROR")
                 return False
-            
-            # Save the file
-            with open(self.ip_file, 'w') as f:
+
+            with open(self.ip_file, 'w', encoding='utf-8', newline='\n') as f:
                 f.write(content)
-            
+
             self.log(f"✅ Downloaded IP file with {valid_ips} valid IPs")
             self.log(f"Saved to: {os.path.abspath(self.ip_file)}")
             return True
-            
+
         except Exception as e:
             self.log(f"Failed to save downloaded IP file: {str(e)}", "ERROR")
             return False
-    
+
     def create_minimal_ip_file(self):
         """Create a minimal IP file with essential bad actors"""
         minimal_content = """# UPDATE_URL: https://raw.githubusercontent.com/yourusername/fail2ban-ips/main/ip.txt
-# Minimal IP Blacklist - Auto-generated
-# Created when webserver download failed
-# Add your own IPs below or use --update-ips to fetch from threat feeds
+    # Minimal IP Blacklist - Auto-generated
+    # Created when webserver download failed
+    # Add your own IPs below or use --update-ips to fetch from threat feeds
 
-# Known attackers (add your own here)
-52.164.243.255
+    # Known attackers (add your own here)
+    52.164.243.255
 
-# Common scanning networks
-162.142.125.0/24
-167.94.138.0/24
+    # Common scanning networks
+    162.142.125.0/24
+    167.94.138.0/24
 
-# Add more IPs here as needed
-"""
+    # Add more IPs here as needed
+    """
         try:
             with open(self.ip_file, 'w') as f:
                 f.write(minimal_content)
             self.log(f"Created minimal IP file: {self.ip_file}")
         except Exception as e:
             self.log(f"Failed to create minimal IP file: {str(e)}", "ERROR")
-        """Validate IP address or CIDR block"""
+
+    def validate_ip(self, ip: str) -> bool:
+        """Validate an IPv4 address or IPv4 CIDR block."""
+        if ip is None:
+            return False
         ip = ip.strip()
         if not ip or ip.startswith('#'):
             return False
-        
-        # Handle CIDR blocks
+
         if '/' in ip:
             try:
-                ip_part = ip.split('/')[0]
-                cidr_part = int(ip.split('/')[1])
-                if not (0 <= cidr_part <= 32):
+                ip_part, cidr_part = ip.split('/', 1)
+                cidr = int(cidr_part)
+                if not (0 <= cidr <= 32):
                     return False
                 ip = ip_part
             except (ValueError, IndexError):
                 return False
-        
-        # Validate IP address
+
         parts = ip.split('.')
         if len(parts) != 4:
             return False
-        
         try:
-            for part in parts:
-                num = int(part)
-                if not (0 <= num <= 255):
-                    return False
-            return True
+            return all(0 <= int(part) <= 255 for part in parts)
         except ValueError:
             return False
-    
+
     def update_ip_blacklist(self, interactive=True):
         """Update IP blacklist from various threat intelligence sources"""
         self.log("🔄 Starting IP blacklist update...")
-        
+
         if interactive:
             update_choice = input("\nUpdate IP blacklist from threat intelligence sources? (y/n): ").lower()
             if update_choice != 'y':
                 self.log("IP blacklist update skipped by user")
                 return True
-        
-        # Create temporary file for new IPs
+
         new_ips = set()
-        
-        # Source 1: Ipsum (top 100 most reported IPs)
-        self.log("Fetching top malicious IPs from ipsum...")
+
+        # ---------- Source 1: Ipsum (top 100 most reported IPs) ----------
+        self.log("Fetching top malicious IPs from Ipsum...")
         success, content = self.download_url(
             "https://raw.githubusercontent.com/stamparm/ipsum/master/ipsum.txt",
             "Ipsum threat intelligence feed"
         )
         if success:
-            lines = content.split('\n')
             count = 0
-            for line in lines:
-                if count >= 100:  # Top 100 only
+            for line in content.splitlines():
+                if count >= 100:
                     break
-                if line.strip() and not line.startswith('#'):
-                    ip = line.strip().split()[0] if line.strip().split() else ""
-                    if self.validate_ip(ip):
-                        new_ips.add(ip)
-                        count += 1
+                line = line.strip()
+                if not line or line.startswith('#'):
+                    continue
+                ip = line.split()[0]
+                if self.validate_ip(ip) or self.validate_ipv6(ip):
+                    new_ips.add(ip)
+                    count += 1
             self.log(f"Added {count} IPs from Ipsum feed")
-        
-        # Source 2: Spamhaus DROP list
+
+        # ---------- Source 2: Spamhaus DROP list ----------
         self.log("Fetching Spamhaus DROP list...")
         success, content = self.download_url(
             "https://www.spamhaus.org/drop/drop.txt",
@@ -279,15 +277,17 @@ class Fail2BanInstaller:
         )
         if success:
             count = 0
-            for line in content.split('\n'):
-                if line.strip() and not line.startswith(';') and not line.startswith('#'):
-                    ip_block = line.strip().split()[0] if line.strip().split() else ""
-                    if self.validate_ip(ip_block):
-                        new_ips.add(ip_block)
-                        count += 1
+            for raw in content.splitlines():
+                line = raw.strip()
+                if not line or line.startswith(';') or line.startswith('#'):
+                    continue
+                ip_block = line.split()[0]
+                if self.validate_ip(ip_block) or self.validate_ipv6(ip_block):
+                    new_ips.add(ip_block)
+                    count += 1
             self.log(f"Added {count} IP blocks from Spamhaus DROP list")
-        
-        # Source 3: Tor exit nodes
+
+        # ---------- Source 3: Tor exit nodes ----------
         self.log("Fetching Tor exit nodes...")
         success, content = self.download_url(
             "https://www.dan.me.uk/tornodes",
@@ -295,51 +295,57 @@ class Fail2BanInstaller:
         )
         if success:
             count = 0
-            for line in content.split('\n'):
-                line = line.strip()
-                if line and line[0].isdigit():  # Lines starting with digits
-                    ip = line.split()[0] if line.split() else ""
-                    if self.validate_ip(ip):
-                        new_ips.add(ip)
-                        count += 1
-                        if count >= 50:  # Limit Tor nodes to avoid blocking too many
-                            break
+            for raw in content.splitlines():
+                line = raw.strip()
+                if not line:
+                    continue
+                # Simple heuristic: typical lines begin with the IP
+                first = line.split()[0]
+                if self.validate_ip(first) or self.validate_ipv6(first):
+                    new_ips.add(first)
+                    count += 1
+                    if count >= 50:  # keep Tor additions bounded
+                        break
             self.log(f"Added {count} Tor exit nodes")
-        
+
         if not new_ips:
             self.log("No new IPs retrieved from sources", "WARNING")
             return False
-        
-        # Read existing IP file
+
+        # ---------- Read existing ip.txt (keep only valid entries) ----------
         existing_ips = set()
         if os.path.exists(self.ip_file):
             try:
-                with open(self.ip_file, 'r') as f:
-                    for line in f:
-                        line = line.strip()
-                        if line and not line.startswith('#'):
+                with open(self.ip_file, 'r', encoding='utf-8', errors='ignore') as f:
+                    for raw in f:
+                        line = raw.strip()
+                        if not line or line.startswith('#'):
+                            continue
+                        if self.validate_ip(line) or self.validate_ipv6(line):
                             existing_ips.add(line)
-                self.log(f"Found {len(existing_ips)} existing IPs in {self.ip_file}")
+                        else:
+                            self.log(f"Skipping invalid existing entry: {line}", "WARNING")
+                self.log(f"Found {len(existing_ips)} existing valid entries in {self.ip_file}")
             except Exception as e:
                 self.log(f"Error reading existing IP file: {str(e)}", "ERROR")
-        
-        # Combine and deduplicate
+
+        # ---------- Combine, dedupe, and stats ----------
         all_ips = existing_ips.union(new_ips)
         newly_added = new_ips - existing_ips
-        
         self.log(f"Total unique IPs after update: {len(all_ips)}")
         self.log(f"Newly added IPs: {len(newly_added)}")
-        
-        # Write updated IP file
+
+        # ---------- Write back with header + preserved comments ----------
         try:
-            # Create backup
+            # Create a single, reusable backup path
+            backup_file = None
             if os.path.exists(self.ip_file):
                 backup_file = f"{self.ip_file}.backup.{int(time.time())}"
                 subprocess.run(["cp", self.ip_file, backup_file], check=True)
                 self.log(f"Backed up existing IP file to: {backup_file}")
-            
-            # Write new file with header
-            with open(self.ip_file, 'w') as f:
+
+            with open(self.ip_file, 'w', encoding='utf-8', newline='\n') as f:
+                # Header
                 f.write("# UPDATE_URL: https://raw.githubusercontent.com/yourusername/fail2ban-ips/main/ip.txt\n")
                 f.write("# Enhanced IP Blacklist - Auto-updated\n")
                 f.write(f"# Last updated: {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
@@ -348,104 +354,115 @@ class Fail2BanInstaller:
                 f.write("# Lines starting with # are ignored\n")
                 f.write("# Format: One IP or CIDR block per line\n")
                 f.write("#\n\n")
-                
-                # Write original content from existing file (preserve comments and structure)
-                if os.path.exists(f"{self.ip_file}.backup.{int(time.time())}"):
+
+                # Preserve comments / blank lines from original file (if any)
+                if backup_file and os.path.exists(backup_file):
                     try:
-                        with open(f"{self.ip_file}.backup.{int(time.time())}", 'r') as backup_f:
+                        with open(backup_file, 'r', encoding='utf-8', errors='ignore') as backup_f:
                             original_content = backup_f.read()
-                            # Extract comments and original structure
-                            for line in original_content.split('\n'):
-                                if line.strip().startswith('#') or not line.strip():
+                            for raw in original_content.splitlines():
+                                line = raw.rstrip('\n')
+                                if not line.strip() or line.lstrip().startswith('#'):
                                     f.write(line + '\n')
-                                elif self.validate_ip(line.strip()):
-                                    # This IP will be written below with all IPs
-                                    pass
-                    except:
-                        pass
-                
+                                # skip IPs here — we’ll write all deduped IPs below
+                    except Exception as e:
+                        self.log(f"Could not restore comments from backup: {e}", "WARNING")
+
                 f.write("\n# =================================\n")
                 f.write("# AUTO-UPDATED THREAT INTELLIGENCE\n")
                 f.write("# =================================\n\n")
-                
-                # Write all IPs sorted
-                for ip in sorted(all_ips, key=lambda x: tuple(map(int, x.split('/')[0].split('.')))):
+
+                # Robust sort key for IPv4/IPv6 addresses and networks
+                def _addr_sort_key(s: str):
+                    try:
+                        if '/' in s:
+                            net = ipaddress.ip_network(s, strict=False)
+                        else:
+                            # make a /32 (v4) or /128 (v6) network for uniform sorting
+                            if ':' in s:
+                                net = ipaddress.ip_network(f"{s}/128", strict=False)
+                            else:
+                                net = ipaddress.ip_network(f"{s}/32", strict=False)
+                        return (net.version, net.network_address.packed, net.prefixlen)
+                    except Exception:
+                        # Unknown/invalid strings go to the end, but we shouldn't have any
+                        return (9, s.encode(), 999)
+
+                for ip in sorted(all_ips, key=_addr_sort_key):
                     f.write(f"{ip}\n")
-            
+
             self.log(f"✅ Updated IP blacklist saved to {self.ip_file}")
-            
-            # Show some newly added IPs
-            if newly_added and len(newly_added) > 0:
-                sample_new = list(newly_added)[:10]  # Show first 10 new IPs
+
+            if newly_added:
+                sample_new = list(newly_added)[:10]
                 self.log("Sample of newly added IPs:")
                 for ip in sample_new:
                     self.log(f"  + {ip}")
                 if len(newly_added) > 10:
                     self.log(f"  ... and {len(newly_added) - 10} more")
-            
+
             return True
-            
+
         except Exception as e:
             self.log(f"Failed to write updated IP file: {str(e)}", "ERROR")
             return False
-    
-    def ban_attacker_ips(self, ip_file):
-        """Ban IPs from the specified file"""
+
+
+    def ban_attacker_ips(self, ip_file, jail="sshd"):
+        """Ban IPs and CIDR ranges from the specified file via Fail2Ban (firewalld backend).
+        - Supports IPv4 and IPv4 CIDR (per validate_ip)
+        - Uses only `fail2ban-client set <jail> banip <target>` (no raw iptables fallback)
+        """
         if not os.path.exists(ip_file):
             self.log(f"IP file {ip_file} not found, skipping IP banning", "WARNING")
             return True
-        
-        self.log(f"Reading IPs from {ip_file}...")
-        banned_count = 0
-        failed_count = 0
-        
+
+        self.log(f"Reading IPs from {ip_file} (jail: {jail})...")
+        singles = 0
+        cidrs = 0
+        failed = 0
+
         try:
-            with open(ip_file, 'r') as f:
+            with open(ip_file, 'r', encoding='utf-8', errors='ignore') as f:
                 for line_num, line in enumerate(f, 1):
                     line = line.strip()
-                    
+
                     # Skip comments and empty lines
                     if not line or line.startswith('#'):
                         continue
-                    
-                    # Validate IP
-                    if not self.validate_ip(line):
-                        self.log(f"Invalid IP format on line {line_num}: {line}", "WARNING")
+
+                    # Validate (full IPv4 or IPv4/CIDR) – prevents accidental /24 from partial matches
+                    if not (self.validate_ip(line) or self.validate_ipv6(line)):
+                        self.log(f"Invalid IP/CIDR format on line {line_num}: {line}", "WARNING")
                         continue
-                    
-                    # Ban IP using fail2ban
+
+                    # Apply ban via fail2ban (relies on firewalld action in the jail)
                     success, _ = self.run_command(
-                        f"fail2ban-client set sshd banip {line}",
+                        f"fail2ban-client set {jail} banip {line}",
                         f"Banning {line}"
                     )
-                    
+
                     if success:
-                        banned_count += 1
-                    else:
-                        # Try direct iptables rule as fallback
-                        success, _ = self.run_command(
-                            f"iptables -A INPUT -s {line} -j DROP",
-                            f"Adding iptables rule for {line}"
-                        )
-                        if success:
-                            banned_count += 1
+                        if '/' in line:
+                            cidrs += 1
                         else:
-                            failed_count += 1
-                    
-                    # Add small delay to avoid overwhelming the system
-                    if banned_count % 10 == 0:
-                        time.sleep(0.1)
-        
+                            singles += 1
+                        # Gentle pacing
+                        if (singles + cidrs) % 50 == 0:
+                            time.sleep(0.1)
+                    else:
+                        failed += 1
+
         except Exception as e:
             self.log(f"Error reading IP file: {str(e)}", "ERROR")
             return False
-        
-        self.log(f"✅ Banned {banned_count} IPs from {ip_file}")
-        if failed_count > 0:
-            self.log(f"⚠️  Failed to ban {failed_count} IPs", "WARNING")
-        
-        return True
-    
+
+        self.log(f"✅ Banned from {ip_file} — Singles: {singles}, CIDRs: {cidrs}")
+        if failed:
+            self.log(f"⚠️  Failed bans: {failed}. Check jail/action config.", "WARNING")
+
+        return failed == 0
+
     def setup_ip_update_cron(self):
         """Set up automatic IP list updates via cron"""
         cron_job = f"0 2 * * * /usr/bin/python3 {os.path.abspath(__file__)} --update-ips"
@@ -729,19 +746,19 @@ ignoreregex =
             return False
     
     def backup_existing_config(self):
-        """Backup existing configuration"""
-        jail_local = self.config_dir / "jail.local"
-        if jail_local.exists():
-            backup_path = self.config_dir / f"jail.local.backup.{int(time.time())}"
-            try:
-                subprocess.run(["cp", str(jail_local), str(backup_path)], check=True)
-                self.log(f"Backed up existing config to: {backup_path}")
-                return True
-            except Exception as e:
-                self.log(f"Failed to backup config: {str(e)}", "ERROR")
-                return False
-        return True
-    
+            """Backup existing configuration"""
+            jail_local = self.config_dir / "jail.local"
+            if jail_local.exists():
+                backup_path = self.config_dir / f"jail.local.backup.{int(time.time())}"
+                try:
+                    subprocess.run(["cp", str(jail_local), str(backup_path)], check=True)
+                    self.log(f"Backed up existing config to: {backup_path}")
+                    return True
+                except Exception as e:
+                    self.log(f"Failed to backup config: {str(e)}", "ERROR")
+                    return False
+            return True
+        
     def apply_configuration(self, config):
         """Apply Fail2Ban configuration"""
         self.log("Applying Fail2Ban configuration...")
@@ -806,73 +823,93 @@ ignoreregex =
             self.log(f"Currently banned IPs: {banned_ips}")
     
     def install_and_configure(self):
-        """Main installation and configuration process"""
-        print("🛡️ Fail2Ban Automated Installer & Configurator")
-        print("=" * 50)
-        
-        # Check prerequisites
-        self.check_root()
-        
-        # Install Fail2Ban
-        if not self.install_fail2ban():
-            self.log("Installation failed!", "ERROR")
+            """Main installation and configuration process"""
+            print("🛡️ Fail2Ban Automated Installer & Configurator")
+            print("=" * 50)
+            
+            # Check prerequisites
+            self.check_root()
+            
+            # Install Fail2Ban
+            if not self.install_fail2ban():
+                self.log("Installation failed!", "ERROR")
+                return False
+            
+            self.log("✅ Fail2Ban installed successfully!")
+            
+            # Update IP blacklist
+            self.update_ip_blacklist(interactive=True)
+            
+            # Get configuration
+            config = self.get_user_input()
+            
+            # Download IP file from webserver if needed
+            if not os.path.exists(self.ip_file):
+                self.download_ip_file(interactive=True)
+            else:
+                # Ask if user wants to download fresh copy
+                self.download_ip_file(interactive=True)
+            
+            # Apply configuration
+            if not self.apply_configuration(config):
+                self.log("Configuration failed!", "ERROR")
+                return False
+            
+            self.log("✅ Configuration applied successfully!")
+            
+            # Ban IPs from file
+            self.ban_attacker_ips(self.ip_file)
+            
+            # Set up automatic updates if requested
+            if config.get('auto_update'):
+                self.setup_ip_update_cron()
+            
+            # Show status
+            self.show_status()
+            
+            print("\n🎯 Installation Complete!")
+            print("=" * 50)
+            print("✅ Fail2Ban is installed and configured")
+            print("✅ PHP attack protection enabled")
+            print(f"✅ IP blacklist loaded from {self.ip_file}")
+            print("✅ SSH brute force protection active")
+            print("✅ Threat intelligence feeds integrated")
+            
+            if config.get('email'):
+                print(f"✅ Email notifications enabled: {config['email']}")
+            
+            if config.get('auto_update'):
+                print("✅ Automatic daily IP updates scheduled")
+            
+            print("\n📋 Useful Commands:")
+            print("• Check status: sudo fail2ban-client status")
+            print("• Check banned IPs: sudo fail2ban-client banned")
+            print("• Unban IP: sudo fail2ban-client set <jail> unbanip <IP>")
+            print("• Check logs: sudo tail -f /var/log/fail2ban.log")
+            print(f"• Update IPs manually: sudo python3 {os.path.abspath(__file__)} --update-ips")
+            print(f"• Download fresh IP list: sudo python3 {os.path.abspath(__file__)} --download-ips [URL]")
+            
+            return True
+    def validate_ipv6(self, token: str) -> bool:
+        """
+        True if `token` is a valid IPv6 address or IPv6 CIDR (/0–/128).
+        Accepts compressed forms (e.g., 2001:db8::1). Ignores blanks/comments.
+        """
+        import ipaddress
+
+        if token is None:
             return False
-        
-        self.log("✅ Fail2Ban installed successfully!")
-        
-        # Update IP blacklist
-        self.update_ip_blacklist(interactive=True)
-        
-        # Get configuration
-        config = self.get_user_input()
-        
-        # Download IP file from webserver if needed
-        if not os.path.exists(self.ip_file):
-            self.download_ip_file(interactive=True)
-        else:
-            # Ask if user wants to download fresh copy
-            self.download_ip_file(interactive=True)
-        
-        # Apply configuration
-        if not self.apply_configuration(config):
-            self.log("Configuration failed!", "ERROR")
+        s = token.strip()
+        if not s or s.startswith('#'):
             return False
-        
-        self.log("✅ Configuration applied successfully!")
-        
-        # Ban IPs from file
-        self.ban_attacker_ips(self.ip_file)
-        
-        # Set up automatic updates if requested
-        if config.get('auto_update'):
-            self.setup_ip_update_cron()
-        
-        # Show status
-        self.show_status()
-        
-        print("\n🎯 Installation Complete!")
-        print("=" * 50)
-        print("✅ Fail2Ban is installed and configured")
-        print("✅ PHP attack protection enabled")
-        print(f"✅ IP blacklist loaded from {self.ip_file}")
-        print("✅ SSH brute force protection active")
-        print("✅ Threat intelligence feeds integrated")
-        
-        if config.get('email'):
-            print(f"✅ Email notifications enabled: {config['email']}")
-        
-        if config.get('auto_update'):
-            print("✅ Automatic daily IP updates scheduled")
-        
-        print("\n📋 Useful Commands:")
-        print("• Check status: sudo fail2ban-client status")
-        print("• Check banned IPs: sudo fail2ban-client banned")
-        print("• Unban IP: sudo fail2ban-client set <jail> unbanip <IP>")
-        print("• Check logs: sudo tail -f /var/log/fail2ban.log")
-        print(f"• Update IPs manually: sudo python3 {os.path.abspath(__file__)} --update-ips")
-        print(f"• Download fresh IP list: sudo python3 {os.path.abspath(__file__)} --download-ips [URL]")
-        
-        return True
+        try:
+            if '/' in s:
+                ipaddress.IPv6Network(s, strict=False)  # allow host bits
+            else:
+                ipaddress.IPv6Address(s)
+            return True
+        except ValueError:
+            return False
 
 def main():
     """Main function"""
