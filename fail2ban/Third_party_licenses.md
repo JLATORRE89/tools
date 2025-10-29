@@ -1,6 +1,6 @@
 # Third-Party Licenses
 
-This document contains the licenses and source code locations for all open source software used in VoidGuard Security Enhanced Server Protection.
+This document contains the licenses and source code locations for all open source software used in this application.
 
 ## Core Security Framework
 

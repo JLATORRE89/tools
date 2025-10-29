@@ -13,7 +13,7 @@ Supports:
 - Cloudflare
 - Generic HTTP caches
 
-Author: Converted from PowerShell by Python
+Author: Jason LaTorre
 """
 
 import requests
