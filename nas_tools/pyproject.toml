@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "nas_tools"
+version = "1.0.0"
+description = "WD My Cloud NAS discovery and mounting utilities"
+authors = [{ name = "Jason LaTorre" }]
+license = { text = "MIT" }
+readme = { text = "Utilities for discovering and mounting Western Digital My Cloud NAS devices.", content-type = "text/plain" }
+requires-python = ">=3.8"
+keywords = ["WD", "My Cloud", "NAS", "SMB", "mount", "discovery"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Operating System :: OS Independent",
+    "Topic :: System :: Networking",
+    "Topic :: Utilities",
+]
+
+[project.scripts]
+wd-discovery = "nas_tools.wd_discovery:main"
+wd-mount = "nas_tools.wd_mount:main"

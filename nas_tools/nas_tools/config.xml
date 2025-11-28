@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<config>
+  <network>
+    <timeout>5</timeout>
+  </network>
+  <share>
+    <hostname>MYCLOUD</hostname>
+    <ip></ip>
+    <smb_share>Public</smb_share>
+    <username>guest</username>
+    <password encoding="base64"></password>
+    <mount_point>/mnt/mycloud</mount_point>
+    <drive_letter>Z:</drive_letter>
+  </share>
+</config>
