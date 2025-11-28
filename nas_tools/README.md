@@ -4,7 +4,7 @@ Western Digital (WD) My Cloud discovery and SMB mounting utilities.
 
 - **Author:** Jason LaTorre  
 - **Version:** 1.0.0  
-- **License:** MIT
+- **License:** 
 
 ## Highlights
 - SSDP/UPnP discovery with `python -m nas_tools.wd_discovery` or `wd-discovery`.
