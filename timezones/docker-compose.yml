@@ -1,0 +1,28 @@
+version: '3.8'
+
+services:
+  timezone-api:
+    build: .
+    container_name: timezone-api
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    volumes:
+      # Persist GeoIP database
+      - ./geodb:/app/geodb:ro,z
+    environment:
+      - TZ=UTC
+    networks:
+      - timezone-network
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8000/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    security_opt:
+      - label=disable
+
+networks:
+  timezone-network:
+    driver: bridge

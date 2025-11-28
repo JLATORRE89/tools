@@ -1,0 +1,42 @@
+[Unit]
+Description=Timezone API Service (Podman)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/timezone-api
+Restart=always
+RestartSec=10
+
+# Run as non-root user (optional, adjust as needed)
+# User=podman-user
+# Group=podman-user
+
+# Start the container
+ExecStartPre=-/usr/bin/podman stop timezone-api
+ExecStartPre=-/usr/bin/podman rm timezone-api
+ExecStart=/usr/bin/podman run \
+    --name timezone-api \
+    -p 8000:8000 \
+    -v /opt/timezone-api/geodb:/app/geodb:ro,z \
+    -e TZ=UTC \
+    --health-cmd "curl -f http://localhost:8000/health || exit 1" \
+    --health-interval 30s \
+    --health-timeout 10s \
+    --health-retries 3 \
+    --health-start-period 10s \
+    timezone-api:latest
+
+# Stop the container
+ExecStop=/usr/bin/podman stop -t 10 timezone-api
+
+# Clean up on stop
+ExecStopPost=-/usr/bin/podman rm timezone-api
+
+# Security settings
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
