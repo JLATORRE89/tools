@@ -1,6 +1,6 @@
 # GeoIP Configuration
 GeoIP.conf
-
+timezones/GeoIP.conf
 # Python
 __pycache__/
 *.py[cod]
