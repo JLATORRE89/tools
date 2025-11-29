@@ -11,28 +11,86 @@ import os
 import requests
 import tarfile
 import shutil
+import logging
+from logging.handlers import TimedRotatingFileHandler
+
+
+def setup_logger(log_dir: str = "./logs") -> logging.Logger:
+    """
+    Set up logger with weekly rotation
+
+    Args:
+        log_dir: Directory to store log files
+
+    Returns:
+        Configured logger instance
+    """
+    # Create logs directory if it doesn't exist
+    os.makedirs(log_dir, exist_ok=True)
+
+    # Create logger
+    logger = logging.getLogger("IPTimezoneLookup")
+    logger.setLevel(logging.INFO)
+
+    # Prevent duplicate handlers
+    if logger.handlers:
+        return logger
+
+    # File handler with weekly rotation (W0 = Monday)
+    log_file = os.path.join(log_dir, "ip_timezone_lookup.log")
+    file_handler = TimedRotatingFileHandler(
+        log_file,
+        when="W0",  # Rotate every Monday
+        interval=1,
+        backupCount=4,  # Keep 4 weeks of logs
+        encoding="utf-8"
+    )
+    file_handler.setLevel(logging.INFO)
+
+    # Console handler
+    console_handler = logging.StreamHandler()
+    console_handler.setLevel(logging.WARNING)
+
+    # Formatter
+    formatter = logging.Formatter(
+        "%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S"
+    )
+    file_handler.setFormatter(formatter)
+    console_handler.setFormatter(formatter)
+
+    # Add handlers
+    logger.addHandler(file_handler)
+    logger.addHandler(console_handler)
+
+    return logger
 
 
 class IPTimezoneLookup:
-    def __init__(self, db_path: str = None):
+    def __init__(self, db_path: str = None, log_dir: str = "./logs"):
         """
         Initialize IP timezone lookup
 
         Args:
             db_path: Path to GeoLite2-City.mmdb file. If not provided, will look in common locations.
+            log_dir: Directory to store log files (default: ./logs)
         """
+        self.logger = setup_logger(log_dir)
         self.db_path = db_path or self._find_database()
         self.reader = None
 
         if self.db_path and os.path.exists(self.db_path):
             try:
                 self.reader = geoip2.database.Reader(self.db_path)
-                print(f"✅ Loaded GeoIP2 database from: {self.db_path}")
+                self.logger.info(f"Loaded GeoIP2 database from: {self.db_path}")
+                print(f"[OK] Loaded GeoIP2 database from: {self.db_path}")
             except Exception as e:
-                print(f"❌ Error loading GeoIP2 database: {e}")
+                self.logger.error(f"Error loading GeoIP2 database: {e}")
+                print(f"[ERROR] Error loading GeoIP2 database: {e}")
                 self.reader = None
         else:
-            print("⚠️  GeoIP2 database not found. Please download it first.")
+            self.logger.warning("GeoIP2 database not found")
+            print("[WARNING] GeoIP2 database not found. Please download it first.")
             print("   Run: python3 download_geodb.py")
 
     def _find_database(self) -> str:
@@ -63,6 +121,7 @@ class IPTimezoneLookup:
         """
         if not self.reader:
             # Fallback to basic mapping if no database
+            self.logger.warning(f"No database available, using fallback for IP: {ip}")
             return self._fallback_timezone(ip)
 
         try:
@@ -70,18 +129,24 @@ class IPTimezoneLookup:
 
             # Get timezone from location
             if response.location.time_zone:
+                self.logger.info(f"IP {ip} -> Timezone: {response.location.time_zone}")
                 return response.location.time_zone
 
             # Fallback: try to determine from country
             if response.country.iso_code:
-                return self._country_to_timezone(response.country.iso_code)
+                tz = self._country_to_timezone(response.country.iso_code)
+                self.logger.info(f"IP {ip} -> Country {response.country.iso_code} -> Timezone: {tz}")
+                return tz
 
+            self.logger.warning(f"No timezone found for IP: {ip}")
             return None
 
         except geoip2.errors.AddressNotFoundError:
             # IP not found in database
+            self.logger.warning(f"IP not found in database: {ip}, using fallback")
             return self._fallback_timezone(ip)
         except Exception as e:
+            self.logger.error(f"Error looking up IP {ip}: {e}")
             print(f"Error looking up IP {ip}: {e}")
             return None
 
@@ -91,6 +156,7 @@ class IPTimezoneLookup:
         including ZIP code and county/state subdivision.
         """
         if not self.reader:
+            self.logger.warning(f"No database available for location info lookup: {ip}")
             return {
                 "ip": ip,
                 "timezone": self._fallback_timezone(ip),
@@ -118,7 +184,7 @@ class IPTimezoneLookup:
                 county = response.subdivisions[0].name
                 state_code = response.subdivisions[0].iso_code
 
-            return {
+            location_data = {
                 "ip": ip,
                 "timezone": response.location.time_zone,
                 "country": response.country.name,
@@ -132,7 +198,11 @@ class IPTimezoneLookup:
                 "continent": response.continent.name
             }
 
+            self.logger.info(f"IP {ip} -> {response.city.name}, {state_code}, {response.country.iso_code} ({response.location.time_zone})")
+            return location_data
+
         except geoip2.errors.AddressNotFoundError:
+            self.logger.warning(f"IP not found in database for location info: {ip}")
             return {
                 "ip": ip,
                 "timezone": self._fallback_timezone(ip),
@@ -147,6 +217,7 @@ class IPTimezoneLookup:
                 "continent": None
             }
         except Exception as e:
+            self.logger.error(f"Error getting location info for {ip}: {e}")
             print(f"Error getting location info for {ip}: {e}")
             return None
 

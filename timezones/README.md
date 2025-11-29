@@ -40,7 +40,7 @@ podman build -t timezone-api:latest .
 # Run container
 podman run -d \
     --name timezone-api \
-    -p 8000:8000 \
+    -p 8000:8100 \
     -v ./geodb:/app/geodb:ro,z \
     -e TZ=UTC \
     --restart unless-stopped \
@@ -92,7 +92,7 @@ python3 download_geodb.py
 python3 main.py
 
 # Production mode
-uvicorn main:app --host 0.0.0.0 --port 8000
+uvicorn main:app --host 0.0.0.0 --port 8100
 ```
 
 ## API Endpoints
@@ -106,7 +106,7 @@ GET /timezone/auto
 **Example:**
 
 ```bash
-curl http://localhost:8000/timezone/auto
+curl http://localhost:8100/timezone/auto
 ```
 
 **Response:**
@@ -131,7 +131,7 @@ GET /timezone/{ip}
 **Example:**
 
 ```bash
-curl http://localhost:8000/timezone/8.8.8.8
+curl http://localhost:8100/timezone/8.8.8.8
 ```
 
 **Response:**
@@ -146,6 +146,55 @@ curl http://localhost:8000/timezone/8.8.8.8
   "is_dst": false
 }
 ```
+
+### Reverse Geocode (Get Location from Coordinates)
+
+```http
+GET /reverse-geocode?lat={latitude}&lon={longitude}
+```
+
+Converts latitude/longitude coordinates to location information including zip code.
+
+**Features:**
+- SQLite cache for fast repeated lookups
+- Uses Nominatim (OpenStreetMap) API with 1 req/sec rate limiting
+- Automatic timezone detection from coordinates
+- 90-day cache retention
+
+**Example:**
+
+```bash
+curl "http://localhost:8100/reverse-geocode?lat=40.7128&lon=-74.0060"
+```
+
+**Response:**
+
+```json
+{
+  "latitude": 40.7128,
+  "longitude": -74.0060,
+  "zip_code": "10007",
+  "city": "New York",
+  "county": "New York County",
+  "state": "New York",
+  "state_code": "NY",
+  "country": "United States",
+  "country_code": "US",
+  "timezone": "America/New_York",
+  "display_name": "New York, New York County, New York, United States",
+  "source": "nominatim",
+  "from_cache": false
+}
+```
+
+**Query Parameters:**
+- `lat` (required): Latitude (-90 to 90)
+- `lon` (required): Longitude (-180 to 180)
+
+**Data Sources (Priority Order):**
+1. **Cache**: Previously looked up coordinates (instant)
+2. **Nominatim**: OpenStreetMap reverse geocoding API (rate limited: 1 req/sec)
+3. **None**: Returns partial data if all sources fail
 
 ### Health Check (Global)
 
@@ -258,6 +307,20 @@ def get_client_timezone() -> dict:
     resp = requests.get(f"{BASE_URL}/auto", timeout=5)
     resp.raise_for_status()
     return resp.json()
+
+def reverse_geocode(latitude: float, longitude: float) -> dict:
+    """Get location info (including zip code) from coordinates"""
+    resp = requests.get(
+        f"{BASE_URL}/reverse-geocode",
+        params={"lat": latitude, "lon": longitude},
+        timeout=10
+    )
+    resp.raise_for_status()
+    return resp.json()
+
+# Example usage
+location = reverse_geocode(40.7128, -74.0060)
+print(f"Zip: {location['zip_code']}, City: {location['city']}")
 ```
 
 Other VoidGuard services (e.g., licensing, logging, analytics) should call this API instead of talking directly to the GeoLite2 database.
@@ -291,7 +354,7 @@ Other VoidGuard services (e.g., licensing, logging, analytics) should call this 
 
      ```nginx
      location / {
-         proxy_pass http://127.0.0.1:8000;
+         proxy_pass http://127.0.0.1:8100;
          proxy_set_header Host $host;
          proxy_set_header X-Real-IP $remote_addr;
          proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
@@ -350,7 +413,7 @@ server {
     server_name timezone-api.yourdomain.com;
 
     location / {
-        proxy_pass http://127.0.0.1:8000;
+        proxy_pass http://127.0.0.1:8100;
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
@@ -365,7 +428,7 @@ server {
 
 ```javascript
 // Auto-detect client timezone
-fetch('http://localhost:8000/timezone/auto')
+fetch('http://localhost:8100/timezone/auto')
   .then(response => response.json())
   .then(data => {
     console.log(`Timezone: ${data.timezone}`);
@@ -374,9 +437,18 @@ fetch('http://localhost:8000/timezone/auto')
   });
 
 // Get timezone for specific IP
-fetch('http://localhost:8000/timezone/8.8.8.8')
+fetch('http://localhost:8100/timezone/8.8.8.8')
   .then(response => response.json())
   .then(data => console.log(data));
+
+// Reverse geocode coordinates to get zip code
+fetch('http://localhost:8100/reverse-geocode?lat=40.7128&lon=-74.0060')
+  .then(response => response.json())
+  .then(data => {
+    console.log(`Zip: ${data.zip_code}`);
+    console.log(`City: ${data.city}, ${data.state_code}`);
+    console.log(`Timezone: ${data.timezone}`);
+  });
 ```
 
 ### Python
@@ -385,28 +457,37 @@ fetch('http://localhost:8000/timezone/8.8.8.8')
 import requests
 
 # Auto-detect
-response = requests.get('http://localhost:8000/timezone/auto')
+response = requests.get('http://localhost:8100/timezone/auto')
 data = response.json()
 print(f"Timezone: {data['timezone']}")
 print(f"Current Time: {data['current_time']}")
 
 # Specific IP
-response = requests.get('http://localhost:8000/timezone/8.8.8.8')
+response = requests.get('http://localhost:8100/timezone/8.8.8.8')
 data = response.json()
 print(data)
+
+# Reverse geocode coordinates
+response = requests.get('http://localhost:8100/reverse-geocode',
+                       params={'lat': 40.7128, 'lon': -74.0060})
+data = response.json()
+print(f"Zip: {data['zip_code']}, City: {data['city']}, State: {data['state_code']}")
 ```
 
 ### cURL
 
 ```bash
 # Auto-detect
-curl http://localhost:8000/timezone/auto
+curl http://localhost:8100/timezone/auto
 
 # Specific IP
-curl http://localhost:8000/timezone/8.8.8.8
+curl http://localhost:8100/timezone/8.8.8.8
 
-# Pretty print
-curl http://localhost:8000/timezone/8.8.8.8 | jq
+# Reverse geocode coordinates
+curl "http://localhost:8100/reverse-geocode?lat=40.7128&lon=-74.0060"
+
+# Pretty print with jq
+curl "http://localhost:8100/reverse-geocode?lat=40.7128&lon=-74.0060" | jq
 ```
 
 ## Configuration
@@ -448,7 +529,7 @@ app.add_middleware(
 **Solution:** Change the port in `main.py` or kill the process using port 8000:
 
 ```bash
-sudo lsof -i :8000
+sudo lsof -i :8100
 sudo kill -9 <PID>
 ```
 
@@ -481,16 +562,45 @@ Or set up automatic updates with cron:
 This service uses the free GeoLite2 database from MaxMind. Make sure to comply with their license terms:
 [https://www.maxmind.com/en/geolite2/eula](https://www.maxmind.com/en/geolite2/eula)
 
+## Logging
+
+The `ip_timezone_lookup.py` module includes automatic logging with weekly rotation:
+
+- **Log location:** `./logs/ip_timezone_lookup.log` (or custom directory)
+- **Rotation:** Every Monday at midnight
+- **Retention:** 4 weeks of historical logs
+- **Auto-cleanup:** Old logs are automatically deleted
+
+### Log Levels
+- **INFO:** Successful IP lookups, database operations
+- **WARNING:** Fallback operations, missing database, IPs not found
+- **ERROR:** Exceptions and critical errors
+
+### Using Custom Log Directory
+
+```python
+from ip_timezone_lookup import IPTimezoneLookup
+
+# Use custom log directory
+lookup = IPTimezoneLookup(log_dir="/var/log/timezone-api")
+```
+
+### Log Format
+```
+2025-11-28 15:30:45 - IPTimezoneLookup - INFO - IP 8.8.8.8 -> Chicago, IL, US (America/Chicago)
+```
+
 ## Support
 
 For issues or questions, check the logs:
 
 ```bash
 # Development
-# (if running via uvicorn directly)
-# Check console output
+# Check console output or ./logs/ip_timezone_lookup.log
 
 # Production (systemd)
 sudo journalctl -u timezone-api -f
-```
+
+# Module logs
+tail -f logs/ip_timezone_lookup.log
 ```

@@ -1,0 +1,1 @@
+clpctl system:permissions:reset --directories=770 --files=660 --path=.
