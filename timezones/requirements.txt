@@ -5,3 +5,5 @@ python-multipart==0.0.6
 geoip2==4.7.0
 pytz==2024.1
 requests==2.31.0
+# timezonefinder - optional, for enhanced timezone detection from coordinates
+# timezonefinder==6.5.2
