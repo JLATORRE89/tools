@@ -204,6 +204,11 @@ RANDOM_PLAYER_GO_BUTTON = (847, 1060)
 def sh(cmd):
     return subprocess.run(cmd, shell=True, capture_output=True, text=True)
 
+def is_device_connected():
+    """True iff adb currently sees exactly one authorized, ready device."""
+    result = sh(f"{ADB} get-state")
+    return result.returncode == 0 and result.stdout.strip() == "device"
+
 def screenshot():
     """Captures via raw (uncompressed) screencap instead of -p (PNG) -
     confirmed live 2026-09-11 this is ~2.2x faster overall (~540ms vs
@@ -215,12 +220,31 @@ def screenshot():
     time - USB bandwidth was never the bottleneck. Raw format: 16-byte
     header (width, height, format, extra - all uint32 LE) then raw
     RGBA8888 pixel data - verified against a real screenshot (colors and
-    content both correct, not byte-swapped) before deploying."""
+    content both correct, not byte-swapped) before deploying.
+
+    Checks for a missing/disconnected device before trusting the captured
+    bytes (2026-09-13: a struct.unpack crash on truncated data was the
+    only symptom of an unplugged phone, spamming an unreadable traceback
+    to the log every ~10s via the supervisor's auto-restart) so that case
+    exits with one clear message instead."""
     sh(f"{ADB} exec-out screencap > {_RAW_SCREENSHOT}")
     from PIL import Image
     import struct
     with open(_RAW_SCREENSHOT, "rb") as f:
         data = f.read()
+    if len(data) < 16:
+        if not is_device_connected():
+            print("\nERROR: No Android device connected via adb.\n"
+                  "Reconnect the phone's USB cable, unlock its screen, and accept\n"
+                  "any 'Allow USB debugging?' prompt, then restart this script.",
+                  file=sys.stderr)
+        else:
+            print(f"\nERROR: adb screencap returned only {len(data)} bytes "
+                  "(expected at least a 16-byte header) even though a device "
+                  "is connected. Screen may be locked/off, or adb may need a "
+                  "restart (adb kill-server && adb start-server).",
+                  file=sys.stderr)
+        sys.exit(1)
     w, h, fmt, extra = struct.unpack("<IIII", data[:16])
     img = Image.frombuffer("RGBA", (w, h), data[16:], "raw", "RGBA", 0, 1).convert("RGB")
     img.save(SCREENSHOT)
