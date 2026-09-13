@@ -1,0 +1,127 @@
+#!/usr/bin/env bash
+# Records the connected device's screen (adb screenrecord) for building a
+# training/reference walkthrough. Passive - injects no input, so it is safe
+# to run while a human is physically tapping through the device.
+set -euo pipefail
+
+ADB=/ai/android-sdk/platform-tools/adb
+OUT_DIR="${ANDROID_TAP_LOG_DIR:-/ai/android-training-data}"
+mkdir -p "$OUT_DIR"
+PIDFILE=/tmp/android-screenrecord.pid
+LABELFILE=/tmp/android-screenrecord.label
+LOOPPIDFILE=/tmp/android-screenrecord-loop.pid
+DEVICE_PATH=/sdcard/training-recording.mp4
+
+usage() {
+  echo "Usage: android-screen-record {start [label]|stop|loop [label]|stop-loop|status}"
+  echo
+  echo "start     - begin a single recording (max 180s, an Android adb limit)"
+  echo "stop      - end a single recording and pull the .mp4 into $OUT_DIR"
+  echo "loop      - continuously record back-to-back ~180s clips with no gaps,"
+  echo "            each saved automatically as its own file, until stopped"
+  echo "stop-loop - end the loop after the current clip finishes and saves"
+  echo "status    - check if a recording or loop is currently in progress"
+}
+
+cmd="${1:-}"
+
+case "$cmd" in
+  start)
+    label="${2:-session}"
+    if [[ -f "$PIDFILE" ]] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null; then
+      echo "A recording is already in progress (PID $(cat "$PIDFILE"))."
+      exit 0
+    fi
+    if ! "$ADB" devices | grep -q "[[:space:]]device$"; then
+      echo "No connected device/emulator found."
+      exit 1
+    fi
+    "$ADB" shell rm -f "$DEVICE_PATH" 2>/dev/null || true
+    nohup "$ADB" shell screenrecord --time-limit 180 "$DEVICE_PATH" > /tmp/android-screenrecord.log 2>&1 &
+    echo $! > "$PIDFILE"
+    echo "$label" > "$LABELFILE"
+    disown
+    echo "Recording started (PID $!)."
+    echo "Max 180s per clip (Android's own adb screenrecord limit)."
+    echo "Run \"android-screen-record stop\" to end and save it."
+    ;;
+  stop)
+    if [[ ! -f "$PIDFILE" ]]; then
+      echo "No recording in progress."
+      exit 1
+    fi
+    pid="$(cat "$PIDFILE")"
+    kill -INT "$pid" 2>/dev/null || true
+    sleep 2
+    rm -f "$PIDFILE"
+    label="session"
+    [[ -f "$LABELFILE" ]] && label="$(cat "$LABELFILE")"
+    rm -f "$LABELFILE"
+    safe_label="$(echo "$label" | tr -c "[:alnum:]_-" "_")"
+    ts="$(date +%Y%m%d-%H%M%S)"
+    out="$OUT_DIR/${ts}_${safe_label}.mp4"
+    "$ADB" pull "$DEVICE_PATH" "$out"
+    "$ADB" shell rm -f "$DEVICE_PATH"
+    echo "Saved: $out"
+    ;;
+  loop)
+    label="${2:-loop}"
+    if [[ -f "$LOOPPIDFILE" ]] && kill -0 "$(cat "$LOOPPIDFILE")" 2>/dev/null; then
+      echo "A recording loop is already running (PID $(cat "$LOOPPIDFILE"))."
+      exit 0
+    fi
+    if ! "$ADB" devices | grep -q "[[:space:]]device$"; then
+      echo "No connected device/emulator found."
+      exit 1
+    fi
+    safe_label="$(echo "$label" | tr -c "[:alnum:]_-" "_")"
+    (
+      while true; do
+        "$ADB" shell rm -f "$DEVICE_PATH" 2>/dev/null || true
+        "$ADB" shell screenrecord --time-limit 180 "$DEVICE_PATH"
+        ts="$(date +%Y%m%d-%H%M%S)"
+        out="$OUT_DIR/${ts}_${safe_label}.mp4"
+        if "$ADB" pull "$DEVICE_PATH" "$out" 2>/dev/null; then
+          echo "Saved: $out"
+        else
+          echo "Pull failed for this segment (device disconnected?)"
+        fi
+        "$ADB" shell rm -f "$DEVICE_PATH" 2>/dev/null || true
+      done
+    ) > "$OUT_DIR/loop.log" 2>&1 &
+    echo $! > "$LOOPPIDFILE"
+    disown
+    echo "Continuous recording loop started (PID $!)."
+    echo "A new ~180s clip is saved automatically to $OUT_DIR every cycle."
+    echo "Progress log: $OUT_DIR/loop.log"
+    echo "Stop with: android-screen-record stop-loop"
+    ;;
+  stop-loop)
+    if [[ ! -f "$LOOPPIDFILE" ]]; then
+      echo "No recording loop running."
+      exit 1
+    fi
+    loop_pid="$(cat "$LOOPPIDFILE")"
+    rm -f "$LOOPPIDFILE"
+    rec_pid="$(pgrep -f "platform-tools/adb.*shell screenrecord" | head -1 || true)"
+    if [[ -n "$rec_pid" ]]; then
+      kill -INT "$rec_pid" 2>/dev/null || true
+      sleep 2
+    fi
+    kill "$loop_pid" 2>/dev/null || true
+    echo "Loop stopped. The in-progress clip (if any) was saved normally before stopping."
+    ;;
+  status)
+    if [[ -f "$LOOPPIDFILE" ]] && kill -0 "$(cat "$LOOPPIDFILE")" 2>/dev/null; then
+      echo "Recording loop in progress (PID $(cat "$LOOPPIDFILE")) - new clip every ~180s."
+    elif [[ -f "$PIDFILE" ]] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null; then
+      echo "Single recording in progress (PID $(cat "$PIDFILE"))."
+    else
+      echo "No recording in progress."
+    fi
+    ;;
+  *)
+    usage
+    exit 1
+    ;;
+esac

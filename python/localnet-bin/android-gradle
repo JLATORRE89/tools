@@ -1,0 +1,47 @@
+#!/usr/bin/env bash
+# Bridge from Open WebUI (via local-bin-mcp) to Gradle builds/tests for an
+# Android project. Restricted to a safe task allowlist - arbitrary Gradle
+# tasks can run arbitrary plugin code, so this is not fully open-ended.
+set -euo pipefail
+
+export JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64
+export ANDROID_SDK_ROOT=/ai/android-sdk
+export ANDROID_HOME=/ai/android-sdk
+
+ALLOWED_TASKS=("build" "assembleDebug" "assembleRelease" "clean" "lint" \
+               "test" "testDebugUnitTest" "connectedAndroidTest")
+
+usage() {
+  echo "Usage: android-gradle <project-dir> <task> [extra gradle args...]"
+  echo
+  echo "project-dir must contain a gradlew wrapper."
+  echo "Allowed tasks: ${ALLOWED_TASKS[*]}"
+}
+
+project_dir="${1:-}"
+task="${2:-}"
+shift 2 2>/dev/null || true
+
+if [[ -z "$project_dir" || -z "$task" ]]; then
+  usage
+  exit 1
+fi
+
+allowed=false
+for t in "${ALLOWED_TASKS[@]}"; do
+  [[ "$task" == "$t" ]] && allowed=true
+done
+if [[ "$allowed" != true ]]; then
+  echo "Task '$task' is not allowed."
+  usage
+  exit 1
+fi
+
+project_dir="$(realpath "$project_dir")"
+if [[ ! -x "$project_dir/gradlew" ]]; then
+  echo "No executable gradlew found at $project_dir/gradlew"
+  exit 1
+fi
+
+cd "$project_dir"
+exec ./gradlew "$task" "$@" --console=plain

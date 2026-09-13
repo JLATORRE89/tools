@@ -1,0 +1,120 @@
+#!/usr/bin/env bash
+# Bridge from Open WebUI (via local-bin-mcp) to manage the Android emulator
+# (AVD) lifecycle. start/start-gui launch in the background then show a
+# live boot-progress bar; use status for a one-shot check instead.
+set -euo pipefail
+
+export ANDROID_SDK_ROOT=/ai/android-sdk
+export ANDROID_AVD_HOME=/ai/android-sdk/avd
+EMULATOR=/ai/android-sdk/emulator/emulator
+ADB=/ai/android-sdk/platform-tools/adb
+DEFAULT_AVD="pixel_api35"
+LOG=/tmp/android-emulator.log
+WAIT_TIMEOUT=35
+
+usage() {
+  echo "Usage: android-emulator {start|start-gui|wait|stop|status|list} [avd-name]"
+  echo
+  echo "start      - headless (no visible window); for adb/gradle-driven testing"
+  echo "start-gui  - shows the emulator screen as a window on your current"
+  echo "             display (run this from an actual RDP desktop session, not"
+  echo "             over plain SSH or via Open WebUI - there is no display there)"
+  echo "wait       - show a live boot-progress bar for an already-starting emulator"
+}
+
+wait_boot() {
+  local timeout="$WAIT_TIMEOUT"
+  local elapsed=0
+  local bar_width=30
+  while [ "$elapsed" -lt "$timeout" ]; do
+    boot=""
+    if "$ADB" devices 2>/dev/null | grep -q "^emulator-.*[[:space:]]device$"; then
+      boot="$("$ADB" shell getprop sys.boot_completed 2>/dev/null | tr -d "\r\n" || true)"
+    fi
+    if [ "$boot" = "1" ]; then
+      printf "\r%-50s\n" "Booted in ${elapsed}s."
+      return 0
+    fi
+    remaining=$((timeout - elapsed))
+    filled=$((elapsed * bar_width / timeout))
+    empty=$((bar_width - filled))
+    bar="$(printf "%${filled}s" "" | tr " " "#")$(printf "%${empty}s" "")"
+    printf "\r[%s] %2ds remaining..." "$bar" "$remaining"
+    sleep 1
+    elapsed=$((elapsed + 1))
+  done
+  printf "\n"
+  echo "Still not booted after ${timeout}s. Check: android-emulator status"
+  return 1
+}
+
+# Force the on-screen keyboard to always show, even though the emulator
+# reports a "hardware keyboard" (RDP-forwarded keystrokes don't reliably
+# reach the guest through that path, so relying on it leaves you unable to
+# type at all).
+apply_ime_workaround() {
+  "$ADB" shell settings put secure show_ime_with_hard_keyboard 1 2>/dev/null || true
+}
+
+cmd="${1:-}"
+avd="${2:-$DEFAULT_AVD}"
+
+case "$cmd" in
+  list)
+    /ai/android-sdk/cmdline-tools/latest/bin/avdmanager list avd
+    ;;
+  start)
+    if "$ADB" devices | grep -q "^emulator-"; then
+      echo "An emulator is already running:"
+      "$ADB" devices
+      exit 0
+    fi
+    nohup "$EMULATOR" -avd "$avd" -no-window -no-audio -accel auto -gpu host > "$LOG" 2>&1 &
+    disown
+    echo "Starting emulator '$avd' in the background (PID $!)."
+    wait_boot && apply_ime_workaround
+    ;;
+  start-gui)
+    if [[ -z "${DISPLAY:-}" ]]; then
+      echo "No DISPLAY set. Run this from a terminal inside your RDP desktop session,"
+      echo "not over plain SSH and not through the Open WebUI bridge - there is no"
+      echo "screen to show the emulator window on in those contexts."
+      exit 1
+    fi
+    if "$ADB" devices | grep -q "^emulator-"; then
+      echo "An emulator is already running:"
+      "$ADB" devices
+      echo "Stop it first with: android-emulator stop"
+      exit 0
+    fi
+    nohup "$EMULATOR" -avd "$avd" -no-audio -accel auto -gpu host > "$LOG" 2>&1 &
+    disown
+    echo "Starting emulator '$avd' with a visible window (PID $!)."
+    wait_boot && apply_ime_workaround
+    ;;
+  wait)
+    if ! "$ADB" devices | grep -q "^emulator-"; then
+      echo "No emulator process found. Start one first with start or start-gui."
+      exit 1
+    fi
+    wait_boot && apply_ime_workaround
+    ;;
+  stop)
+    "$ADB" devices | awk "/^emulator-/{print \$1}" | while read -r dev; do
+      "$ADB" -s "$dev" emu kill
+    done
+    echo "Stop requested for all running emulators."
+    ;;
+  status)
+    echo "--- adb devices ---"
+    "$ADB" devices
+    if "$ADB" devices | grep -q "^emulator-"; then
+      echo "--- boot state ---"
+      "$ADB" shell getprop sys.boot_completed 2>&1
+    fi
+    ;;
+  *)
+    usage
+    exit 1
+    ;;
+esac
