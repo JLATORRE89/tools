@@ -1000,7 +1000,7 @@ class LogAuditRecoveryTests(unittest.TestCase):
         capture=mock.Mock(returncode=0,stdout=raw)
         with mock.patch.object(mga,'_continuous_mode',True), mock.patch.object(mga,'is_device_connected',side_effect=[False,True]), mock.patch.object(mga.subprocess,'run',side_effect=[focus,capture]), mock.patch.object(mga.time,'sleep') as sleep:
             mga.screenshot()
-            sleep.assert_called_once_with(15)
+            sleep.assert_called_once_with(mga.DEVICE_POLL_S)
             self.assertEqual(mga.screen_image().getpixel((0,0)),(1,2,3))
 
     def test_payment_focus_waits_without_capture(self):
@@ -1034,6 +1034,59 @@ class LogAuditRecoveryTests(unittest.TestCase):
             mga.close_build_menu()
             mga.close_build_menu()
             self.assertEqual(tap.call_count,4)
+
+class DeviceHotplugTests(unittest.TestCase):
+    def setUp(self):
+        self.saved=(mga._active_serial,mga._device_session_ready,mga._continuous_mode)
+        mga._active_serial=None;mga._device_session_ready=False
+
+    def tearDown(self):
+        mga._active_serial,mga._device_session_ready,mga._continuous_mode=self.saved
+
+    def test_missing_unauthorized_offline_and_multiple_devices_stay_idle(self):
+        for text,phase in [('List of devices attached\n','waiting_for_device'),
+            ('List of devices attached\nphone-a unauthorized\n','waiting_for_debug_authorization'),
+            ('phone-a offline\n','waiting_for_device_online'),
+            ('phone-a device\nphone-b device\n','waiting_for_single_device')]:
+            self.assertEqual(mga._select_adb_device(text),(None,phase))
+        self.assertEqual(mga._select_adb_device('phone-a device\nphone-b device\n','phone-b'),('phone-b','device_ready'))
+
+    def test_new_authorized_device_resets_old_game_state_and_binds_commands(self):
+        mga._continuous_mode=True
+        responses=[mock.Mock(returncode=0,stdout='phone-a device\n'),mock.Mock(returncode=0,stdout='phone-b device\n')]
+        with mock.patch.object(mga.subprocess,'run',side_effect=responses),mock.patch.object(mga,'_reset_device_game_state') as reset,mock.patch.dict(os.environ,{},clear=True):
+            self.assertTrue(mga.is_device_connected());self.assertEqual(mga._adb_args('shell','input','tap','10','20'),[mga.ADB,'-s','phone-a','shell','input','tap','10','20'])
+            self.assertTrue(mga.is_device_connected());self.assertEqual(mga._active_serial,'phone-b');self.assertEqual(reset.call_count,2)
+
+    def test_unauthorized_device_never_gets_input(self):
+        mga._continuous_mode=True
+        with mock.patch.object(mga.subprocess,'run',return_value=mock.Mock(returncode=0,stdout='phone-a unauthorized\n')) as run:
+            self.assertFalse(mga.is_device_connected());self.assertFalse(mga.tap(10,20));self.assertFalse(mga.game_back());self.assertEqual(run.call_count,1)
+
+    def test_waits_through_authorization_game_focus_and_layout_before_publishing(self):
+        import tempfile,struct
+        from pathlib import Path
+        mga._continuous_mode=True
+        stages=['none','unauthorized','other-app','wrong-layout','ready'];index=-1
+        phases=[]
+        def run(command,**kwargs):
+            nonlocal index
+            if command==[mga.ADB,'devices','-l']:
+                index+=1
+                state=stages[index]
+                return mock.Mock(returncode=0,stdout='' if state=='none' else 'phone-a '+('unauthorized' if state=='unauthorized' else 'device')+'\n')
+            self.assertEqual(command[:3],[mga.ADB,'-s','phone-a'])
+            if 'dumpsys' in command:
+                package='com.other.app' if stages[index]=='other-app' else 'com.scopely.monopolygo'
+                return mock.Mock(returncode=0,stdout='mCurrentFocus=Window{123 u0 '+package+'/Game}')
+            self.assertIn('screencap',command)
+            data=struct.pack('<III',720,1280,1) if stages[index]=='wrong-layout' else struct.pack('<III',1080,2340,1)+bytes([0,0,0,255])*1080*2340
+            return mock.Mock(returncode=0,stdout=data)
+        with tempfile.TemporaryDirectory() as tmp,mock.patch.object(mga,'SCREENSHOT',str(Path(tmp)/'screen.png')),mock.patch.object(mga.subprocess,'run',side_effect=run),mock.patch.object(mga.time,'sleep') as sleep,mock.patch.object(mga,'report_phase',side_effect=phases.append),mock.patch.dict(os.environ,{},clear=True):
+            mga.screenshot();self.assertEqual(mga.screen_image().size,(1080,2340));self.assertEqual(sleep.call_count,4)
+        for phase in ['waiting_for_debug_authorization','waiting_for_game_focus','waiting_for_supported_layout']:
+            self.assertIn(phase,phases)
+
 
 class CaptureRetryTests(unittest.TestCase):
     def test_truncated_frame_keeps_old_file_until_success(self):

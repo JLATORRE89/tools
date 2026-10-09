@@ -267,7 +267,50 @@ RANDOM_PLAYER_GO_BUTTON = (847, 1060)
 # proved unsafe: two different upsell designs seen back to back had their
 # X buttons ~30-70px apart from each other.
 
+_active_serial = None
+_device_session_ready = False
+_device_wait_phase = 'waiting_for_device'
+DEVICE_POLL_S = 5
+
+
+def _adb_args(*args):
+    return [ADB, *(['-s', _active_serial] if _active_serial else []), *args]
+
+
+def _select_adb_device(text, configured=None):
+    rows=[]
+    for line in text.splitlines():
+        parts=line.split()
+        if len(parts)>=2 and parts[0] not in {'List','*'}:
+            rows.append((parts[0],parts[1]))
+    if configured:
+        rows=[row for row in rows if row[0]==configured]
+        if not rows:return None,'waiting_for_configured_device'
+    if not rows:return None,'waiting_for_device'
+    if len(rows)!=1:return None,'waiting_for_single_device'
+    serial,state=rows[0]
+    if state=='unauthorized':return None,'waiting_for_debug_authorization'
+    if state=='offline':return None,'waiting_for_device_online'
+    if state!='device':return None,'waiting_for_device_permissions'
+    return serial,'device_ready'
+
+
+def _reset_device_game_state():
+    global _frame_cache,_frame_signature,_house_header,_dig_level
+    global _BOUTIQUE_LAST_FRAME,_multiplier_preferred_box,_spooky_close_retry
+    _frame_cache=_frame_signature=None;_ocr_cache.clear()
+    _house_header=None;_house_attempts.clear();_dig_level=None;_dig_attempts.clear()
+    _treasure_watchdog.reset();_BOUTIQUE_LAST_FRAME=None;_BOUTIQUE_FAILED.clear()
+    _multiplier_cache.clear();_multiplier_cache.update(max=None,probed_at_tick=None)
+    _multiplier_preferred_box=None;_spooky_close_retry=0.0
+
+
 def sh(cmd):
+    if _active_serial and cmd.startswith(ADB+' '):
+        import shlex
+        cmd=ADB+' -s '+shlex.quote(_active_serial)+cmd[len(ADB):]
+    if _continuous_mode and not _device_session_ready and ' shell input ' in cmd:
+        return subprocess.CompletedProcess(cmd,1,'','device not ready')
     try:
         return subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=30)
     except subprocess.TimeoutExpired:
@@ -276,6 +319,22 @@ def sh(cmd):
 
 def is_device_connected():
     """True iff adb currently sees exactly one authorized, ready device."""
+    global _active_serial,_device_session_ready,_device_wait_phase
+    if _continuous_mode:
+        _device_session_ready=False
+        try:
+            result=subprocess.run([ADB,'devices','-l'],capture_output=True,text=True,timeout=5)
+        except (OSError,subprocess.TimeoutExpired):
+            _device_wait_phase='waiting_for_device';return False
+        serial,phase=_select_adb_device(result.stdout,os.environ.get('MONOPOLY_DEVICE_SERIAL')) if result.returncode==0 else (None,'waiting_for_device')
+        _device_wait_phase=phase
+        if serial is None:
+            report_phase(phase);return False
+        if serial!=_active_serial:
+            _reset_device_game_state();_active_serial=serial
+            print('Authorized Android device detected; cleared previous device state before checking game focus.')
+        _device_session_ready=True
+        return True
     result = sh(f"{ADB} get-state")
     return result.returncode == 0 and result.stdout.strip() == "device"
 
@@ -323,13 +382,13 @@ def screenshot():
             if not is_device_connected():
                 raise ConnectionError('device disconnected or not authorized')
             if _continuous_mode:
-                focus = subprocess.run([ADB, 'shell', 'dumpsys', 'window'],
+                focus = subprocess.run(_adb_args('shell', 'dumpsys', 'window'),
                                        capture_output=True, text=True, timeout=5)
                 if focus.returncode or not _game_has_focus(focus.stdout):
                     report_phase('waiting_for_game_focus')
-                    time.sleep(15)
+                    time.sleep(DEVICE_POLL_S)
                     continue
-            result = subprocess.run([ADB, 'exec-out', 'screencap'],
+            result = subprocess.run(_adb_args('exec-out', 'screencap'),
                                     capture_output=True, timeout=15)
             if result.returncode:
                 raise ValueError('capture command failed')
@@ -343,15 +402,16 @@ def screenshot():
             _ocr_cache.clear()
             if measured_at is not None:
                 record_timing('capture', time.monotonic() - measured_at)
-            if _phase in ('waiting_for_device', 'waiting_for_game_focus', 'capture_unavailable'):
+            if _phase and _phase.startswith(('waiting_for_', 'capture_unavailable')):
                 report_phase('evaluating_screen')
             return
         except (OSError, ValueError, subprocess.TimeoutExpired) as exc:
             if not _continuous_mode:
                 print(f'Capture unavailable: {exc}', file=sys.stderr)
                 raise SystemExit(1)
-            report_phase('waiting_for_device' if isinstance(exc, ConnectionError) else 'capture_unavailable')
-            time.sleep(15)
+            phase = _device_wait_phase if isinstance(exc,ConnectionError) else ('waiting_for_supported_layout' if str(exc)=='unsupported capture geometry or pixel format' else 'capture_unavailable')
+            report_phase(phase)
+            time.sleep(DEVICE_POLL_S)
 
 
 _ocr_api = None
@@ -1731,11 +1791,11 @@ def _boutique_drag(source,destination):
     down=False
     try:
         for event,point in (('DOWN',source),('MOVE',destination)):
-            focus=subprocess.run([ADB,'shell','dumpsys','window'],capture_output=True,text=True,timeout=5)
+            focus=subprocess.run(_adb_args('shell','dumpsys','window'),capture_output=True,text=True,timeout=5)
             if focus.returncode or not _game_has_focus(focus.stdout):return False
             # Purchase screens are rejected before this routine by the state gate.
             down=True
-            result=subprocess.run([ADB,'shell','input','motionevent',event,str(point[0]),str(point[1])],capture_output=True,timeout=5)
+            result=subprocess.run(_adb_args('shell','input','motionevent',event,str(point[0]),str(point[1])),capture_output=True,timeout=5)
             if result.returncode:return False
         time.sleep(1)
         return True
@@ -1744,7 +1804,7 @@ def _boutique_drag(source,destination):
     finally:
         if down:
             # UP releases an existing touch; it must run even if focus changed.
-            try:subprocess.run([ADB,'shell','input','motionevent','UP',str(destination[0]),str(destination[1])],capture_output=True,timeout=5)
+            try:subprocess.run(_adb_args('shell','input','motionevent','UP',str(destination[0]),str(destination[1])),capture_output=True,timeout=5)
             except (OSError,subprocess.TimeoutExpired):pass
 
 
@@ -2085,8 +2145,9 @@ def _game_has_focus(window_dump):
 
 def tap(x, y):
     # Recheck immediately before every tap, including nested reward handlers.
+    if _continuous_mode and not _device_session_ready:return False
     try:
-        focus = subprocess.run([ADB, 'shell', 'dumpsys', 'window'],
+        focus = subprocess.run(_adb_args('shell', 'dumpsys', 'window'),
                                capture_output=True, text=True, timeout=5)
         if focus.returncode or not _game_has_focus(focus.stdout):
             print("Game lacks confirmed focus; blocking tap (payment/overlay protection).")
@@ -2098,12 +2159,13 @@ def tap(x, y):
 
 def game_back():
     """Navigate back only while the game, not billing or another app, has focus."""
+    if _continuous_mode and not _device_session_ready:return False
     try:
-        focus = subprocess.run([ADB, 'shell', 'dumpsys', 'window'],
+        focus = subprocess.run(_adb_args('shell', 'dumpsys', 'window'),
                                capture_output=True, text=True, timeout=5)
         if focus.returncode or not _game_has_focus(focus.stdout):
             return False
-        result = subprocess.run([ADB, 'shell', 'input', 'keyevent', 'KEYCODE_BACK'],
+        result = subprocess.run(_adb_args('shell', 'input', 'keyevent', 'KEYCODE_BACK'),
                                 capture_output=True, timeout=5)
         return result.returncode == 0
     except (OSError, subprocess.TimeoutExpired):

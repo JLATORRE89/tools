@@ -1,5 +1,23 @@
 # Monopoly GO Automation Notes
 
+## 2026-10-09 Authorized-device monitoring
+
+The continuous service polls `adb devices -l` every five seconds while waiting.
+It distinguishes no/configured/multiple devices, unauthorized debugging, offline
+transport and missing permissions. Only one authorized device, or an explicitly
+configured `MONOPOLY_DEVICE_SERIAL`, is eligible. It checks exact game foreground
+before capture, validates the calibrated raw-frame geometry, and rechecks focus
+before every input. All capture/focus/input commands are serial-bound. Device
+changes clear old frame/OCR/multiplier and mini-game state; no stale cross-device
+gesture is allowed. Debugging-disabled devices are not ADB-visible and remain
+idle until debugging is enabled/approved on the phone. No automatic app launch,
+screen unlock, authorization approval or recalibration is performed.
+
+141 Windows and Pi tests pass, including simulated missing/unauthorized/offline/
+multiple devices, device swap, other-app focus and unsupported layout. Live Pi
+service detected the authorized phone and published only a validated game frame.
+Physical unplug/replug on another phone remains unverified.
+
 ## 2026-10-09 Spooky Express overview
 
 The observed First Class progress overview displayed 13 points and "Reach 45 to

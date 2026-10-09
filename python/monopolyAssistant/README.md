@@ -12,6 +12,21 @@ connected to the Pi. The Pi runtime uses `/usr/bin/adb`; the LocalNet runtime
 uses `/ai/android-sdk/platform-tools/adb`. Current scope and validation are
 recorded in `RULES.md` and `TASKS.md`.
 
+## Phone connection monitoring
+
+Keep the service running when unplugging the phone. It polls ADB every five
+seconds while idle. No device, offline transport, pending USB debugging approval,
+multiple devices and game-not-in-foreground have distinct waiting states in the
+log. Approve USB debugging on the phone, unlock it and open Monopoly GO to resume.
+The assistant does not enable debugging or launch/unlock the game for you.
+
+One authorized device is selected automatically. With multiple attached devices,
+set `MONOPOLY_DEVICE_SERIAL` in the service environment to select the intended
+one. Capture, focus checks and inputs stay bound to that serial. A new device
+clears previous screenshots, OCR, multiplier and mini-game state before play.
+Unsupported screen geometry stays idle; the current layout is 1080 by 2340.
+`monopoly status` and `monopoly logs` show why the service is waiting.
+
 Side-icon free items: the source checks visible FREE labels on both sides during
 play and dice waiting, then claims only separately verified free gift buttons.
 Paid, locked, conditional, mixed-price or unreadable offers are skipped. Checks
