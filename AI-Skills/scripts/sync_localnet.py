@@ -14,10 +14,15 @@ import shlex
 import shutil
 import subprocess
 import sys
+from receive_catalog import sensitive_catalog_name
 
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'scripts'))
+from repo_env import load_env
+load_env()
 
 LIBRARY = Path(__file__).resolve().parent.parent
-REMOTE_ROOT = "/ai/tools/AI-Skills"
+REMOTE_ROOT = os.environ.get("AI_SKILLS_REMOTE_ROOT", "/ai/tools/AI-Skills")
 
 
 def translate(text):
@@ -32,7 +37,7 @@ def render_skill(name, data):
     if name == "cloudflare/dnsSKILL.md":
         text = text.replace("projects on this workstation.", "projects on localnet.")
         text = re.sub(r"C:[/\\]projects[/\\]emailresellerserver[/\\]",
-                      "/home/jason/email-servers/emailresellerserver/", text,
+                      "${DNS_OPERATOR_CHECKOUT}/", text,
                       flags=re.IGNORECASE)
         text = text.replace("- Reference implementation:", "- Reference implementation on the operator host:")
         text = text.replace("- Operator documentation:", "- Operator documentation on the operator host:")
@@ -72,7 +77,7 @@ def build_snapshot(library=LIBRARY):
     shared = shared.replace("on this workstation", "on localnet")
     shared += """## Agent integration
 
-Jason's `/home/jason/.claude/CLAUDE.md` and `/home/jason/.codex/AGENTS.md` point to this catalog. Shared project guidance is in `/ai/AGENTS.md` and `/ai/tools/AGENTS.md`. Start a new session to load changed startup instructions. Other users, custom profiles, and containers need their own instruction references and filesystem access.
+Jason's `${SERVICE_USER_HOME}/.claude/CLAUDE.md` and `${SERVICE_USER_HOME}/.codex/AGENTS.md` point to this catalog. Shared project guidance is in `/ai/AGENTS.md` and `/ai/tools/AGENTS.md`. Start a new session to load changed startup instructions. Other users, custom profiles, and containers need their own instruction references and filesystem access.
 
 Skills use explicit file references. The custom `dnsSKILL.md` name is preserved; native skill-picker registration is separate.
 
@@ -80,23 +85,28 @@ Skills use explicit file references. The custom `dnsSKILL.md` name is preserved;
 
 Windows is the source of truth. The `AI-Skills Sync to localnet` Windows scheduled task pushes changes every 15 minutes and at login while Jason is signed in and the workstation can reach localnet. New cataloged vendor folders and their supporting files are included automatically. Synchronization adapts the shared-library and DNS operator paths for Linux. Additional Windows-specific paths must be adapted in the synchronizer before those skills can publish.
 
-Edit skills on Windows. Unexpected edits to managed files on localnet stop the sync instead of being overwritten. Backups and the last successful manifest are under `/home/jason/.local/state/ai-skills-sync`. Only files managed by this synchronizer can be removed; unrelated files are preserved.
+Edit skills on Windows. Unexpected edits to managed files on localnet stop the sync instead of being overwritten. Backups and the last successful manifest are under `${SERVICE_USER_HOME}/.local/state/ai-skills-sync`. Only files managed by this synchronizer can be removed; unrelated files are preserved.
 
 The `emailreseller` SSH alias is configured on localnet. Read-only Cloudflare zone access was verified during setup; confirm the requested zone and authorization before each DNS task. Credentials remain on their original hosts.
 """
     result = {"README.md": shared.encode("utf-8")}
+    configuration = library / "configuration.md"
+    if configuration.is_file():
+        result["configuration.md"] = render_skill("configuration.md", configuration.read_bytes())
     for vendor in sorted(vendors):
         folder = library / vendor
-        if folder.is_symlink():
+        if folder.is_symlink() or (hasattr(folder, "is_junction") and folder.is_junction()):
             raise ValueError(f"Symlinked vendor folder: {vendor}")
         for path in sorted(folder.rglob("*")):
             if any(part.startswith(".") or part == "__pycache__"
                    for part in path.relative_to(folder).parts):
                 continue
-            if path.is_symlink() or not path.resolve().is_relative_to(library):
+            if path.is_symlink() or (hasattr(path, "is_junction") and path.is_junction()) or not path.resolve().is_relative_to(library):
                 raise ValueError(f"Linked file outside the curated library: {path}")
             if path.is_file():
                 name = path.relative_to(library).as_posix()
+                if sensitive_catalog_name(name):
+                    raise ValueError(f"Sensitive artifact excluded from skill publication: {name}")
                 result[name] = render_skill(name, path.read_bytes())
     for link in links:
         if link not in result:
@@ -115,7 +125,7 @@ def run_sync():
     if not executable:
         raise RuntimeError("OpenSSH client was not found")
     command = [executable, "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=yes",
-               "-o", "ConnectTimeout=10", "localnet", "python3 -c " + shlex.quote(receiver)]
+               "-o", "ConnectTimeout=10", os.environ.get("LOCALNET_SSH_ALIAS", "localnet"), "python3 -c " + shlex.quote(receiver)]
     options = {"creationflags": subprocess.CREATE_NO_WINDOW} if os.name == "nt" else {}
     process = subprocess.run(command, input=json.dumps(payload), text=True, encoding="utf-8",
                              capture_output=True, timeout=100, **options)

@@ -79,3 +79,13 @@ credentials.json
 token.json
 *.pem
 *.key
+
+# Private environment variants (keep templates reviewable)
+.env.*
+!.env.example
+!.env.*.example
+
+# Local archive identified by the sensitive-file audit
+/ntfsMount.tar.gz
+
+.claude/settings.local.json

@@ -1,0 +1,6 @@
+{
+  "version": 1,
+  "enabled": false,
+  "provider": "brave",
+  "api_key_env": "GPU_PRODUCT_SEARCH_API_KEY"
+}

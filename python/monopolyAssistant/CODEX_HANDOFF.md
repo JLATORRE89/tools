@@ -1,5 +1,40 @@
 # Codex Handoff: Monopoly GO Automation Project
 
+## Current deployment (2026-10-06)
+
+Active host is rpi3, user service `monopoly-assist.service`. LocalNet is the
+synchronized inactive fallback. Windows source is `python/monopolyAssistant`;
+`python/localnet-bin/monopoly-go-assist` is identical. Pi uses `/usr/bin/adb`;
+LocalNet uses `/ai/android-sdk/platform-tools/adb`. See the latest RULES.md and
+TASKS.md sections for GO sparkle/Color Wheel fixes, 132 regression tests, live
+verification and backups. Boutique autoplay remains default-off. Historical
+LocalNet-only deployment details below are retained as background.
+
+
+## Current maintenance state (2026-09-20)
+
+This section supersedes conflicting historical notes below. Canonical source,
+tests and current RULES.md are in `python/monopolyAssistant`; the executable
+mirror is `python/localnet-bin/monopoly-go-assist`.
+
+- Check empty dice before multiplier probes; never cycle the badge at zero dice.
+- Small remaining fills use a contiguous blue-patch check. A 3%-only cutoff
+  incorrectly classified the observed 3/60 dice as empty.
+- Cache each decoded frame and region OCR only until the screenshot changes;
+  screenshot writes are atomic. Normal idle polling is 0.35 seconds.
+- Empty-dice checks run every 15 seconds and resume when dice return.
+- Preserve two complete matching multiplier OCR readings, 2-second animation
+  settling and the 60-second failed-probe cooldown. Discover the available
+  maximum; do not assume x3 or x20.
+- Measured cached pixel checks: 512.22ms to 6.43ms (~80x), excluding capture,
+  OCR and game animation. This is not a 20x end-to-end gameplay claim.
+- Live roll verification: x3, dice 3/60 to 0/60 and increased cash. Other event
+  paths were regression-tested, not all replayed live.
+- Run `python -m unittest test_monopoly_go_assist -q` from the canonical
+  source directory. All 47 tests must pass. Direct script execution runs the
+  same full suite. Pillow is needed by frame-cache regression tests.
+
+
 Written 2026-09-06, handing off from a Claude Code session to whoever
 (Codex or otherwise) picks this up next. This file is meant to be
 self-contained — read this, then `RULES.md` in the same directory for the
@@ -10,7 +45,7 @@ needing to ask the user to re-explain anything already covered here.
 
 The user plays "Monopoly GO" (`com.scopely.monopolygo`) on their real
 Android phone, connected via USB to a Linux box on the LAN called
-`localnet` (Ubuntu 24.04, SSH alias `localnet`, IP 192.168.1.80). The goal
+`localnet` (Ubuntu 24.04, SSH alias `localnet`, IP ${LOCALNET_HOST}). The goal
 is to have "our local AI" (an Open WebUI instance running on `localnet`)
 automate the repetitive parts of play — rolling dice, bumping the reward
 multiplier, buying building upgrades, and flipping match-3 tiles — driven
@@ -341,3 +376,54 @@ if __name__ == "__main__":
 Run `ssh localnet "monopoly-go-assist status"` to confirm the phone is
 still connected and readable, then read `/ai/monopolygo/RULES.md` in full
 for mechanics context before changing anything.
+
+Build-menu follow-up (2026-09-20): current suite is 52 tests. The named-city progress footer detects themed menus even when header color and price OCR fail. Close recovery is verified; card taps recheck screen state; visits are capped and cooled down. Backoff checks dice before any new build visit. See current RULES.md.
+
+2026-09-22: Purchase-loop guard deployed. Automatic shop visits disabled; detected
+purchase close attempts bounded to two; unknown dimmed modals pause with no blind
+taps. 56 tests pass. Both live scripts and localnet-bin mirror SHA256:
+6c34b843349f9baf74735a5bd2af1743db40216a437d93b5a6b7329d0ac00535.
+Purchase popup not present for live testing; unknown dialogs may need manual close.
+
+2026-09-22 billing-screen follow-up (supersedes earlier live-test limitation):
+The observed Google Play sheet was cancelled with Android Back; the game confirmed cancellation. The Profit Herder offer's close button was above the old scan range. Expanded orange-X detection to y=230..550. Shape-detected reward buttons now require recognized COLLECT/CLAIM/GO text; prices and locked FREE offers are rejected. Every tap checks exact Monopoly foreground focus and fails closed if billing or an unknown window has focus. This is defense in depth, not a guarantee against every future store layout or a focus change between check and input.
+60 regression tests pass. Deployed scripts and workstation mirrors match SHA256 f74e95589aa1bddd327aed32717200294bfaae1e6226f8c5189ed911519a489f. Live automation closed the actual offer on its first close-only attempt, returned to the board with 0/60 dice, and runs as one loop. Earlier source backups retained beside deployed scripts. Preserve these guards; never restore blind popup taps.
+
+2026-09-22 full-log audit: reviewed all 12 logs; 70 regression tests pass locally and on Localnet. Removed residual blind popup taps from dice backoff; validated raw captures and portrait dimensions; isolated per-process frame/OCR files; continuous mode waits through disconnects and missing game focus rather than crashing. Failed BUILD closes have a 60s cooldown. All messages are timestamped with classified state intervals. A loop lock prevents duplicate automation. See LOG_AUDIT_20260922.md for counts, evidence and limitations. Deployed hash 08f2c31c201dd3a69b54b1f1f7ee652066c55f9e63a82e55b145b6a326b41fe8. Phone disconnected at deployment: one loop waiting safely; actual gameplay/reconnect still needs live verification. No blind unlock swipes: bring the unlocked game to foreground after reconnecting.
+
+## Live follow-up and navigation recovery (2026-09-22)
+The phone reconnected and the deployed loop resumed without a restart. Pick a Box was cleared live. Further inspection found an actual 1/60 pill whose blue fill occupied x376..379, y2157..2179, outside the former scanline. A contiguous 3-by-5 blue edge patch now recognizes this last die; saved 0/60 capture still returns zero. Bounded building during true dice waits is restored after event/dice checks, using existing visit budgets/cooldowns.
+Unknown dimmed popups now get at most two guarded Android Back attempts after a 15-second settling period; no blind center taps. Failed BUILD closes try one guarded Back before cooldown. Back requires exact game foreground and cannot operate on billing/other apps. These recovery paths do not authorize purchases or guarantee every future dialog is dismissible.
+74 tests pass on workstation and host. Deployed/source hash: 4665dcc855a933ad82e882decc0b079f28c4b1d17c262423625a7e9a4ec951b7. Live run recognized the saved last die, settled at observed x3, issued GO, opened BUILD, spent banked cash on upgrades and closed BUILD on the first attempt. Back-fallback paths are regression-tested; their live failure conditions were not artificially induced. Earlier disconnected-device verification limitation is resolved by actual automatic reconnect, but permanent hardware availability and future game UI compatibility cannot be guaranteed.
+
+Last-die multiplier correction: live game permitted selection of x3 with only 1 die, then reset to x1 on GO, causing the bot to probe x3 again. Confirmed rounded-edge last-die detection now selects x1 without a maximum probe. The live run then entered a raid and selected its target. 76 tests pass locally and on host; final hash 0ef49b4049bde0e3bb7a1301f6ef7fa0b2846428e17ff75976c65890f5c1059c. This supersedes the intermediate hashes above. Preserve maximum discovery for ordinary dice availability and the confirmed last-die x1 exception.
+
+Final live readback: last die consumed (1/60 to 0/60), raid reward collected, purchase offer closed, and subsequent unknown popup cleared by the first guarded Back attempt. Returned to normal board with 0/60 dice and no build badge. This also verifies unknown-popup Back recovery live; BUILD Back fallback remains covered by tests because normal BUILD close succeeded.
+
+## Quick Wins gift-box decisions (2026-09-23)
+1. On the unobstructed board, detect the red badge at the bottom-left WINS icon. Check during ordinary play AND dice backoff; do not require a roll-count tick threshold. Reopening has a five-minute monotonic cooldown.
+2. If already inside verified Quick Wins, resume its reward chain immediately. Recognize QUICK/WINS, MILESTONE REACHED, QUICK WIN COMPLETE, or the combined WEEKLY PRIZE/FILL THE BAR footer (stylized title OCR can be blank).
+3. On these verified screens, find a green button and require an exact normalized COLLECT, TAP TO CLAIM, CLAIM or GO label before tapping. A second inset crop excludes the button rim when OCR adds spurious letters. Reject prices, FREE, and unknown labels.
+4. Wait three seconds after a claim. Refresh and reverify; tolerate short animations with three additional checks. Claim up to twelve buttons per visit; never tap through an unverified screen. Verified Quick Wins precedes the broad orange-color purchase detector because celebration confetti can trigger it.
+5. When no verified claim remains, use guarded Android Back only if still inside verified Quick Wins. Return control to event handling, rolling or dice waiting. Actual purchase dialogs and unrelated screens are not part of this handler.
+6. On a disconnect, continuous mode keeps its existing safe reconnect behavior. Never interpret missing capture data as another claim target.
+
+79 regression tests pass on workstation and Localnet. Live claims verified the 2,770,000 cash milestone, a 20-dice reward and chained daily rewards. Source/live SHA256 d6b0e6a12c8c930e05de24cf71f7d9ff9f7b401711abcbdd48b27803e0a6e9f3. Workstation mirror synchronized. No purchase buttons were used.
+
+Quick Wins final live verification: all three daily tasks claimed, milestone/chain completed, gift badge cleared, returned to board. Dice increased 0/60 to 30/60; cash 264,544 to 3,727,544; event hammers 72 to 84. Fixed generic TSV fallback mistaking task text 'Collect 1 Sticker' for a button: COLLECT must stand alone on its OCR line. If guarded Back leaves the verified completed Wins page open, tap its observed close X (540,2245), never a guessed button outside that verified screen. 80 tests pass locally and on host. Final deployed/mirror hash 4dfebc5b6d8b04cfab314e7922640f0ce637b32e3654917302bfa0e02a02a2af supersedes the intermediate hash.
+
+## Treasure digging event (2026-09-23)
+Recognize LEVEL n/18 plus blue display case before generic popup, BUILD or roll handling, including during dice backoff. OCR the remaining hammer count; no tile tap if unreadable or zero. Detect compact blue-star connected components within the dig grid, refresh after every tile, and permit at most two attempts per tile per level. Current strategy chooses center-near tiles; it is not an optimal hidden-object solver. Recognize TREASURES FOUND and verify the COLLECT label. At zero hammers, guarded Back then verified event close returns to ordinary play. Tutorial was advanced manually from its highlighted tiles; automated tutorial parsing is not claimed.
+Live: first treasure uncovered with two hammers, level 1's 50-dice reward collected; level 2 grid (15 tiles) and remaining 82 hammers correctly detected. Handler deployed in both loop paths; 83 regression tests pass locally and on Localnet. Hash a2b61a5010da11f7dfb7f2b0577b6ab0fce6c1cba0639e588e12de0fc89891d4. Workstation mirror synchronized. Unknown future tile designs wait without blind taps.
+
+Treasure live follow-up: automatic tile handling completed level 2; its 100-dice reward screen was observed, and the loop advanced to level 3 with 67 hammers. Level-3 tile recognition confirmed.
+
+Treasure exit watchdog (2026-09-23): live level 5 introduced gold-star tiles the current blue-star detector did not recognize, exposing an unbounded wait. Exit now triggers at zero hammers, 45 seconds without a level/hammer-count change (including unreadable counts or a stuck reward), or a 10-minute visit limit. Exit taps only the verified event's observed close X, re-captures to confirm departure, and bounds close attempts to two before guarded Back and a 30-second retry cooldown. No automatic re-entry is added. Gold-star tile solving is not implemented by this fix; the watchdog returns to normal play instead of waiting indefinitely. 86 tests passed locally and on Localnet. Deployed hash 92c381d9c6fd75c2d7e001d36eb52cab3c81f2a5c4e0ed688c8df7ac67377bfb.
+
+Live watchdog verification: stalled level-5 event closed automatically at 07:23:27; fresh capture confirmed normal board and the loop resumed multiplier verification. No manual close was used for this test.
+
+## Productive mini-game play (2026-09-23)
+Supersedes the ten-minute treasure visit limit: continue while level or hammer count progresses. Leave at zero hammers or after 45 seconds without progress. Reinforced gold-star tiles now qualify only with a blue tile background; flood-fill keeps gold and blue components separate. Retry budget is two taps per tile/color/level, allowing reinforced tiles to change state. Existing purchase and foreground guards remain. 87 tests pass locally and on Localnet. Tutorial and event entry remain manual; this does not add support for every mini-game. Final source hash: 6ef39b0f5c61d3cbc6ac24ac014aee04e1b1570a47289226d49cad618e5b427c.
+
+Live gold-star verification: all four remaining reinforced tiles on level 5 were detected; automation completed the treasure and reached the 9,700,000 cash COLLECT reward. Generic verified reward handler claimed it. Productive play resumed with no manual tile taps.
+

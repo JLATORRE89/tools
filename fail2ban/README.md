@@ -208,17 +208,17 @@ echo "0 1 * * * /usr/bin/python3 /path/to/fail2ban_installer.py --download-ips" 
 
 #### Ban an IP immediately:
 ```bash
-sudo fail2ban-client set sshd banip 192.168.1.100
+sudo fail2ban-client set sshd banip 192.0.2.100
 ```
 
 #### Unban an IP:
 ```bash
-sudo fail2ban-client set sshd unbanip 192.168.1.100
+sudo fail2ban-client set sshd unbanip 192.0.2.100
 ```
 
 #### Add permanent IP to blacklist:
 ```bash
-echo "192.168.1.100" >> ip.txt
+echo "192.0.2.100" >> ip.txt
 sudo python3 fail2ban_installer.py --update-ips
 ```
 

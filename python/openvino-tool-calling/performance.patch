@@ -1,0 +1,32 @@
+--- openvino_openai_server_managed.py
++++ openvino_openai_server_managed.py
+@@ -6,5 +6,5 @@
+ import time
+ import uuid
+-from openvino_tool_protocol import parse_tool_calls, history_messages
++from openvino_tool_protocol import parse_tool_calls, history_messages, tool_generation_options
+ from dataclasses import dataclass
+ from pathlib import Path
+@@ -89,8 +89,14 @@
+     gc.collect()
+     print(f"Loading model: {model_id} ({spec.pipeline})", flush=True)
++    properties = {}
++    cache_dir = os.getenv("OPENVINO_COMPILE_CACHE")
++    if cache_dir:
++        cache = Path(cache_dir) / model_id
++        cache.mkdir(parents=True, exist_ok=True)
++        properties["CACHE_DIR"] = str(cache)
+     if spec.pipeline == "vlm":
+-        pipeline = ov_genai.VLMPipeline(spec.path, DEVICE)
++        pipeline = ov_genai.VLMPipeline(spec.path, DEVICE, **properties)
+     else:
+-        pipeline = ov_genai.LLMPipeline(spec.path, DEVICE)
++        pipeline = ov_genai.LLMPipeline(spec.path, DEVICE, **properties)
+     _pipeline = pipeline
+     _pipeline_model = model_id
+@@ -134,4 +140,5 @@
+             "do_sample": bool(req.temperature and req.temperature > 0),
+         }
++        kwargs.update(tool_generation_options(req.tools, req.tool_choice))
+         if kwargs["do_sample"]:
+             kwargs["temperature"] = max(float(req.temperature or 0.7), 0.01)

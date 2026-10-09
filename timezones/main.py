@@ -28,24 +28,14 @@ app = FastAPI(
     version="1.1.0"
 )
 
-SENSITIVE_PUBLIC_EXTENSIONS = (
-    ".db", ".sqlite", ".sqlite3", ".sql", ".log",
-    ".tar", ".gz", ".zip", ".bak", ".backup",
-)
+from sensitive_paths import is_sensitive_public_path
 
 
 @app.middleware("http")
 async def block_sensitive_public_paths(request: Request, call_next):
-    path = request.url.path.lower()
-    if (
-        path == "/.env"
-        or path.startswith("/.env.")
-        or path.startswith("/.git")
-        or path.startswith("/logs/")
-        or path.startswith("/backup")
-        or path.endswith(SENSITIVE_PUBLIC_EXTENSIONS)
-    ):
-        raise HTTPException(status_code=404, detail="Not found")
+    if is_sensitive_public_path(request.url.path):
+        # HTTPException outside FastAPI's exception layer can become a500.
+        return JSONResponse(status_code=404, content={"detail": "Not found"})
     return await call_next(request)
 
 # Enable CORS for all origins (customize as needed)

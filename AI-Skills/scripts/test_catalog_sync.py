@@ -49,6 +49,29 @@ class SenderTests(unittest.TestCase):
             self.assertEqual(base64.b64decode(payload["files"]["vendor/reference.bin"]["data"]), b"\x00\xff")
 
 
+    def test_secret_artifact_stops_publication(self):
+        for filename in ['credentials.json', 'run.log', 'backup.zip', 'private.key']:
+            with self.subTest(filename=filename), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                (root / 'README.md').write_text('## Catalog\n[Task](vendor/SKILL.md)\n## Agent integration\n')
+                (root / 'vendor').mkdir()
+                (root / 'vendor/SKILL.md').write_text('Instructions')
+                (root / 'vendor' / filename).write_text('private fixture')
+                with self.assertRaisesRegex(ValueError, 'Sensitive artifact'):
+                    sync_localnet.build_snapshot(root)
+
+    def test_dotenv_never_published(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / 'README.md').write_text('## Catalog\n[Task](vendor/SKILL.md)\n## Agent integration\n')
+            (root / 'vendor').mkdir()
+            (root / 'vendor/SKILL.md').write_text('Resolve ${PRIVATE_SETTING}')
+            (root / 'vendor/.env').write_text('PRIVATE_SETTING=secret-fixture')
+            result = sync_localnet.build_snapshot(root)
+            self.assertNotIn('vendor/.env', result['files'])
+            self.assertIn(b'${PRIVATE_SETTING}', base64.b64decode(result['files']['vendor/SKILL.md']['data']))
+
+
 @unittest.skipUnless(sys.platform == "linux", "Receiver uses Linux file locking")
 class ReceiverTests(unittest.TestCase):
     def setUp(self):
@@ -112,6 +135,12 @@ class ReceiverTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.apply(example())
         self.assertFalse((outside / "taskSKILL.md").exists())
+
+    def test_nested_sensitive_payload_rejected_before_write(self):
+        for name in ['vendor/.env', 'vendor/.git/config', 'vendor/keys/private.key', 'vendor/archive.zip', 'vendor/logs/run.txt']:
+            with self.subTest(name=name), self.assertRaises(ValueError):
+                self.apply(snapshot({'README.md': b'Catalog', name: b'private fixture'}))
+        self.assertFalse((self.root / 'README.md').exists())
 
     def test_bootstrap_requires_matching_installation_receipt(self):
         self.root.mkdir()

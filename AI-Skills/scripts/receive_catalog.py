@@ -11,6 +11,19 @@ import sys
 import tempfile
 
 
+def sensitive_catalog_name(name):
+    parts = PurePosixPath(name).parts
+    suffixes = ('.env', '.pem', '.key', '.p12', '.pfx', '.db', '.sqlite', '.sqlite3',
+                '.sql', '.log', '.zip', '.tar', '.gz', '.tgz', '.7z', '.bak', '.backup', '~')
+    for part in parts:
+        lower = part.lower()
+        if (lower.startswith('.') or lower in {'logs', 'backups', 'backup', '__pycache__',
+                'credentials.json', 'token.json', 'id_rsa', 'id_ed25519'}
+                or lower.endswith(suffixes) or any(c in part for c in '%?#\x00')):
+            return True
+    return False
+
+
 def digest(data):
     return hashlib.sha256(data).hexdigest()
 
@@ -61,7 +74,7 @@ def apply_locked(payload, root, state):
     files = {}
     for name, item in payload["files"].items():
         destination(root, name)
-        if name.startswith(".") or ("/" not in name and name != "README.md"):
+        if sensitive_catalog_name(name) or ("/" not in name and name not in {"README.md", "configuration.md"}):
             raise ValueError(f"Not a managed catalog file: {name}")
         data = base64.b64decode(item["data"], validate=True)
         if digest(data) != item["sha256"]:

@@ -1,12 +1,30 @@
 # Shared AI skills
 
-Task-specific instructions organized by vendor. Agents working in the projects on this workstation can use this catalog to select a skill and read its full instructions only when needed.
+Task-specific instructions organized by service. Agents working in the projects on this workstation can use this catalog to select a skill and read its full instructions only when needed.
+
+## Private configuration
+
+Read [configuration](configuration.md) before operational work. Real hosts,
+usernames and chat identifiers are in the ignored repository-root `.env`.
+`${NAME}` in a document means resolve that key locally; never paste its value
+back into tracked files. `.env.example` lists the keys without private values.
+The catalog sync never copies or expands `.env`; provision it separately on
+each authorized host.
 
 ## Catalog
 
 | Vendor | Skill | When to load | File |
 | --- | --- | --- | --- |
+| ComfyUI / Blender | Character production | Build and review FPSGAME character references, conditioning packs and rigged PC/Quest candidates. | [comfyui/character-production/SKILL.md](comfyui/character-production/SKILL.md) |
+| Local AI Stack | Review and deploy | Merge remote work and deploy account, storage, worker and WebUI addon changes with verification and rollback. | [local-ai-stack/deploy/SKILL.md](local-ai-stack/deploy/SKILL.md) |
+| Monopoly | Assistant maintenance | Fix stuck game screens or multiplier selection and deploy the existing automation. | [monopoly/assist/SKILL.md](monopoly/assist/SKILL.md) |
 | Cloudflare | Shared DNS management | Inspect or configure a project's DNS, or diagnose a website outage where DNS may be involved, using Jason's existing operator access. | [cloudflare/dnsSKILL.md](cloudflare/dnsSKILL.md) |
+| OpenClaw | Localnet MCP connection | Connect or diagnose ThinkPad OpenClaw access to local MCP and ComfyUI tools. | [openclaw/localnet-mcp/SKILL.md](openclaw/localnet-mcp/SKILL.md) |
+| ComfyUI | Pictures and videos | Render local images/videos, poll jobs, and deliver actual results in Telegram or chat. | [comfyui/render/SKILL.md](comfyui/render/SKILL.md) |
+| Telegram | Local bot operations | Maintain Telegram context/history, rendering requests, and WebUI mirroring. | [telegram/bot/SKILL.md](telegram/bot/SKILL.md) |
+| Telegram | Country-aware weather | Answer weather requests without ambiguous postal-code lookups or an unconfigured search provider. | [telegram/weather/SKILL.md](telegram/weather/SKILL.md) |
+| Open WebUI | Local picture pipeline | Restore Image-control execution through the existing ComfyUI workflow. | [openwebui/images/SKILL.md](openwebui/images/SKILL.md) |
+| Open WebUI | Remote development | Inspect, edit and test a selected project through connected workspace tools. | [openwebui/remote-development/SKILL.md](openwebui/remote-development/SKILL.md) |
 
 ## Load a skill when needed
 
@@ -21,7 +39,7 @@ If no description matches, continue with the project's normal workflow. If a req
 ## Add another vendor or skill
 
 - Create a vendor folder, such as `microsoft` or `aws`, when adding its first skill.
-- Put each workflow in a descriptive file such as `<topic>SKILL.md`. Include a stable `name`, a clear `description`, and the workflow, following the existing DNS file's frontmatter format.
+- For new workflows prefer `<service>/<topic>/SKILL.md`; retain existing custom filenames for compatibility. Include a stable `name`, a clear `description`, and the workflow, following the existing DNS file's frontmatter format.
 - Add a row to the catalog with a precise trigger and a relative file link. Update the row when renaming or moving a skill.
 - Keep credentials out of this library. Reference existing authorized access in the relevant skill.
 

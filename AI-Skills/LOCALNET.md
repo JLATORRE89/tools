@@ -8,12 +8,12 @@ The catalog is installed on localnet and updates automatically from Windows. Its
 | --- | --- |
 | Catalog | `/ai/tools/AI-Skills/README.md` |
 | Cloudflare DNS skill | `/ai/tools/AI-Skills/cloudflare/dnsSKILL.md` |
-| Jason's Claude Code instructions | `/home/jason/.claude/CLAUDE.md` |
-| Jason's Codex instructions | `/home/jason/.codex/AGENTS.md` |
+| Jason's Claude Code instructions | `${SERVICE_USER_HOME}/.claude/CLAUDE.md` |
+| Jason's Codex instructions | `${SERVICE_USER_HOME}/.codex/AGENTS.md` |
 | Shared project instructions | `/ai/AGENTS.md` |
 | Tools project instructions | `/ai/tools/AGENTS.md` |
 | Task notes | `/ai/tools/TASKS.md` |
-| Sync state and backups | `/home/jason/.local/state/ai-skills-sync/` |
+| Sync state and backups | `${SERVICE_USER_HOME}/.local/state/ai-skills-sync/` |
 
 The instruction files point to the short catalog. Agents load matching skill files and references when needed. Start a new session to pick up changed startup guidance. This configures Jason's standard profiles; other users, profiles, or containers need their own references and filesystem access. The custom `dnsSKILL.md` filename uses explicit file loading rather than native skill-picker registration.
 
@@ -52,7 +52,7 @@ Enable-ScheduledTask -TaskName 'AI-Skills Sync to localnet'
 
 ## DNS operator connection
 
-Localnet's `/home/jason/.ssh/config` now defines `emailreseller` using the existing operator endpoint and Jason's account. It uses a dedicated Ed25519 key at `/home/jason/.ssh/id_ed25519_emailreseller_localnet`. The private key was generated on localnet and remains there. Only its public key was added to the operator account; existing authorized keys were preserved.
+Localnet's `${SERVICE_USER_HOME}/.ssh/config` now defines `emailreseller` using the existing operator endpoint and Jason's account. It uses a dedicated Ed25519 key at `${SERVICE_USER_HOME}/.ssh/id_ed25519_emailreseller_localnet`. The private key was generated on localnet and remains there. Only its public key was added to the operator account; existing authorized keys were preserved.
 
 The authorized-key entry uses OpenSSH `restrict`, disabling forwarding, PTY allocation, and user SSH startup scripts. It still provides command access as the existing Jason account; it is not a DNS-only operating-system account. The server's host key was obtained through the workstation's already trusted connection and pinned on localnet with strict host-key checking.
 
@@ -66,8 +66,8 @@ ssh localnet 'ssh emailreseller id -un'
 
 SSH rollback records:
 
-- Operator host: `/home/jason/.ssh/authorized_keys.before_localnet_20260910T020334Z`.
-- Localnet: `/home/jason/.ssh/known_hosts.before_emailreseller_20260910T020351Z`.
+- Operator host: `${SERVICE_USER_HOME}/.ssh/authorized_keys.before_localnet_20260910T020334Z`.
+- Localnet: `${SERVICE_USER_HOME}/.ssh/known_hosts.before_emailreseller_20260910T020351Z`.
 - Dedicated public-key comment: `jason@localnet-emailreseller`.
 
 If revoking this connection, remove only that public-key entry after checking for concurrent changes. Preserve unrelated keys and known-host entries. Do not restore whole historical files over newer edits.
@@ -77,3 +77,12 @@ If revoking this connection, remove only that public-key entry after checking fo
 All 10 sender/receiver tests passed on Linux, covering path adaptation, newly cataloged vendors and assets, repeat runs, backups, local-edit conflicts, managed removals, invalid paths, checksums, missing links, and symlinks. The first live sync published the catalog and DNS skill with read-back verification and backups. The initial `INSTALLATION.json` records the earlier installation; `manifest.json` tracks the current synchronized files.
 
 The actual Windows scheduled-task run also completed successfully with `LastTaskResult = 0`; its repeat sync found no document changes. The registered repetition interval was verified as `PT15M`, with a separate login trigger.
+
+## New service skills and private configuration
+
+The catalog now includes OpenClaw MCP, ComfyUI rendering, Telegram bot history
+and mirroring, and Open WebUI image repairs. New skills use service/topic/SKILL.md.
+The canonical render skill is comfyui/render/SKILL.md; install its copy in the
+OpenClaw workspace skills/comfyui-render directory for native discovery.
+Repository-root .env is provisioned separately and is never expanded into the
+shared catalog. See ../CONFIGURATION.md and the blank .env.example.

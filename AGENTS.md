@@ -35,3 +35,10 @@ C:/Projects/tools/AI-Skills/cloudflare/dnsSKILL.md
 
 Use the existing shared operator access described there.
 Keep changes scoped to this project's domain and the user's request.
+
+## Private configuration
+
+Read CONFIGURATION.md and resolve deployment settings from the ignored root .env.
+Do not copy private values into source, skills, examples, task notes or logs.
+Use scripts/repo_env.py for Python consumers; keep .env.example values blank.
+Run scripts/audit_private_config.py before publishing configuration changes.

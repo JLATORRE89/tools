@@ -55,9 +55,9 @@ working, and sudo on the target (passworded sudo is fine - you'll be
 prompted; NOPASSWD sudo works too).
 
 Examples:
-  py setup_xrdp_gnome.py localnet --user jason --set-password
-  py setup_xrdp_gnome.py 192.168.1.80 --user jason --set-password --desktop-name "LocalNet Desktop"
-  py setup_xrdp_gnome.py localnet --user jason --status
+  py setup_xrdp_gnome.py localnet --user <user-from-.env> --set-password
+  py setup_xrdp_gnome.py <host-from-.env> --user <user-from-.env> --set-password --desktop-name "LocalNet Desktop"
+  py setup_xrdp_gnome.py localnet --user <user-from-.env> --status
 """
 
 from __future__ import annotations

@@ -10,9 +10,9 @@ description: Manage project DNS using Jason's existing Cloudflare operator acces
 - Use the configured OpenSSH alias `ssh emailreseller`; do not use scripted passwords or temporary password files.
 - The Cloudflare API token is on that server at `~/.config/email-reseller/cloudflare-api-token`. Use it there, in memory. Never print it, include it in command arguments/logs, or copy it into another project or workstation file.
 - Token file permissions should be 0600 with parent directory 0700. Verify presence and permissions without displaying contents. Verify access to the requested zone; access to one zone does not establish access to all domains.
-- Reference implementation: `C:/projects/emailresellerserver/scripts/onboard_domain.py`.
-- Operator documentation: `C:/projects/emailresellerserver/docs/DOMAIN_ONBOARDING.md`.
-- Production checkout: `/home/jason/email-servers/emailresellerserver`.
+- Reference implementation: `${DNS_LOCAL_CHECKOUT}/scripts/onboard_domain.py`.
+- Operator documentation: `${DNS_LOCAL_CHECKOUT}/docs/DOMAIN_ONBOARDING.md`.
+- Production checkout: `${DNS_OPERATOR_CHECKOUT}`.
 
 Read the relevant reference before using its commands. The onboarding CLI combines DNS with mail provisioning; it is not a general website DNS CLI. For website-only tasks, use scoped Cloudflare API operations on the SSH server rather than mail-onboarding `apply`. Consult current official Cloudflare API documentation for operations being implemented.
 

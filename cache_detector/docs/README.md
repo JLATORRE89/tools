@@ -179,7 +179,7 @@ python3 proxy_cache_detector.py purge-varnish https://example.com/page
 With custom host and port:
 ```bash
 python3 proxy_cache_detector.py purge-varnish https://example.com/page \
-    --host 192.168.1.10 \
+    --host 192.0.2.10 \
     --port 6081
 ```
 
@@ -211,7 +211,7 @@ python3 proxy_cache_detector.py purge-squid https://example.com/page
 With custom host and port:
 ```bash
 python3 proxy_cache_detector.py purge-squid https://example.com/page \
-    --host 192.168.1.20 \
+    --host 192.0.2.20 \
     --port 3128
 ```
 
