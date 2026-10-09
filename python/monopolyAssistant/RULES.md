@@ -1,5 +1,17 @@
 # Monopoly GO Automation Notes
 
+## 2026-10-09 Manual multiplier preference
+
+Persistent keep/max policy is stored in the user's private preferences file and
+read at each multiplier check. Keep mode retains any readable current value,
+including subsequent manual changes; no automatic badge tap or max probe is
+performed. Unreadable OCR still pauses instead of guessing. Automatic probes
+check for keep mode before each tap and stop when the policy changes. Automatic
+maximum mode retains its previous bounded, observed discovery and cooldown rules.
+The user requested keep mode on the active Pi. The game can still reduce a value
+when insufficient dice are available. This policy does not observe finger input
+or infer who changed the badge. The CLI preference requires no connected device.
+
 ## 2026-10-09 Authorized-device monitoring
 
 The continuous service polls `adb devices -l` every five seconds while waiting.

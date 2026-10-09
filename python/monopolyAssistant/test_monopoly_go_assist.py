@@ -16,6 +16,9 @@ import os
 import unittest
 from unittest import mock
 
+# Exercise the automatic-mode regressions independently of real user preferences.
+os.environ.setdefault('MONOPOLY_MULTIPLIER_MODE','max')
+
 _SCRIPT_PATH = os.path.join(
     os.path.dirname(os.path.abspath(__file__)), "monopoly-go-assist"
 )
@@ -783,16 +786,17 @@ class MultiplierMaxCommandTest(unittest.TestCase):
         mga._multiplier_cache.update(self._orig_cache)
 
     def test_success_exit_code(self):
-        mga._probe_multiplier_max = lambda: 3
+        mga._probe_multiplier_max = mock.Mock(return_value=3)
         self.assertEqual(mga.cmd_multiplier_max(), 0)
+        mga._probe_multiplier_max.assert_called_once_with(respect_mode=False)
 
     def test_failure_exit_code(self):
-        mga._probe_multiplier_max = lambda: None
+        mga._probe_multiplier_max = mock.Mock(return_value=None)
         self.assertEqual(mga.cmd_multiplier_max(), 1)
 
     def test_does_not_touch_the_loop_cache(self):
         mga._multiplier_cache.update({"max": 3, "probed_at_tick": 0})
-        mga._probe_multiplier_max = lambda: 7
+        mga._probe_multiplier_max = mock.Mock(return_value=7)
         mga.cmd_multiplier_max()
         self.assertEqual(mga._multiplier_cache["max"], 3)
 
@@ -1034,6 +1038,36 @@ class LogAuditRecoveryTests(unittest.TestCase):
             mga.close_build_menu()
             mga.close_build_menu()
             self.assertEqual(tap.call_count,4)
+
+class ManualMultiplierModeTests(unittest.TestCase):
+    def test_manual_changes_are_kept_without_probe_or_badge_taps(self):
+        with mock.patch.dict(os.environ,MONOPOLY_MULTIPLIER_MODE='keep'),mock.patch.object(mga,'get_multiplier',side_effect=[(5,'x5'),(2,'x2')]),mock.patch.object(mga,'_probe_multiplier_max') as probe,mock.patch.object(mga,'tap') as tap:
+            self.assertEqual(mga._multiplier_action(1),0);self.assertEqual(mga._multiplier_action(2),0)
+            tap.assert_not_called();probe.assert_not_called()
+
+    def test_keep_mode_does_not_guess_an_unreadable_badge_or_force_last_die(self):
+        with mock.patch.dict(os.environ,MONOPOLY_MULTIPLIER_MODE='keep'),mock.patch.object(mga,'get_multiplier',return_value=(None,'')),mock.patch.object(mga,'tap') as tap:
+            self.assertEqual(mga._multiplier_action(),1);tap.assert_not_called()
+        with mock.patch.dict(os.environ,MONOPOLY_MULTIPLIER_MODE='keep'),mock.patch.object(mga,'get_multiplier',return_value=(3,'x3')),mock.patch.object(mga,'_last_die_detected',True),mock.patch.object(mga,'tap') as tap:
+            self.assertEqual(mga._multiplier_action(),0);tap.assert_not_called()
+
+    def test_mode_change_interrupts_an_automatic_probe_before_a_tap(self):
+        with mock.patch.object(mga,'screenshot'),mock.patch.object(mga,'get_multiplier',return_value=(2,'x2')),mock.patch.object(mga,'_multiplier_mode',return_value='keep'),mock.patch.object(mga,'tap') as tap:
+            self.assertIsNone(mga._probe_multiplier_max());tap.assert_not_called()
+
+    def test_mode_change_also_stops_last_die_badge_adjustment(self):
+        with mock.patch.object(mga,'_multiplier_mode',side_effect=['max','keep']),mock.patch.object(mga,'get_multiplier',return_value=(3,'x3')),mock.patch.object(mga,'_last_die_detected',True),mock.patch.object(mga,'tap') as tap:
+            self.assertEqual(mga._multiplier_action(),0);tap.assert_not_called()
+
+    def test_preferences_persist_and_preserve_other_settings(self):
+        import tempfile,json
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as tmp,mock.patch.dict(os.environ,{'MONOPOLY_PREFERENCES_FILE':str(Path(tmp)/'prefs.json')},clear=True):
+            p=Path(tmp)/'prefs.json';p.write_text(json.dumps({'other':'retained'}))
+            with mock.patch.object(mga.sys,'argv',['assistant','multiplier-mode','keep']):self.assertEqual(mga.cmd_multiplier_mode(),0)
+            self.assertEqual(mga._multiplier_mode(),'keep');self.assertEqual(json.loads(p.read_text())['other'],'retained')
+            p.write_text('{broken');self.assertEqual(mga._multiplier_mode(),'keep')
+
 
 class DeviceHotplugTests(unittest.TestCase):
     def setUp(self):

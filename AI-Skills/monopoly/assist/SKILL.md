@@ -72,3 +72,9 @@ Treasure digging precedes generic popup/build/roll handlers. Verify event, hamme
 Treasure event must exit at zero hammers, 45s without progress, or 10min per visit. Verify the close before assuming return; bound retries. Gold-star grids currently exit via watchdog instead of being solved. 86 tests; see RULES.md.
 
 Productive treasure play has no fixed visit cap. Gold-star tile detection and separate color components are supported; retain 45-second stall exit, zero-hammer exit, and bounded tile retries. 87 tests. See latest RULES.md section; supersedes earlier gold-star limitation.
+
+2026-10-09 maintenance: active host is the Pi user service documented in the source RULES.md; Localnet fallback stays inactive. Wrapped Halloween board titles accept only the observed separator before BOARD plus verified rings. Spooky Express overview recovery requires exact event/progress text and the measured grey footer cross; no upgrade/purchase body taps. Dated introduction evidence and Git comments are in MINIGAME_HISTORY.md.
+
+Device monitoring distinguishes missing, unauthorized, offline, multiple/configured devices and permissions. Only an authorized selected serial with game foreground and calibrated geometry may receive input. Clear cached game state on device changes; do not enable debugging, unlock or launch the game remotely. Five-second idle polling; physical swap acceptance remains separately unverified.
+
+Respect the user's persistent multiplier policy. Keep mode never automatically taps/probes the badge and preserves subsequent manual selections. Max mode retains bounded observed cap discovery and cooldowns. Use `monopoly mode keep|max|status`; current active Pi is set to keep by user request. Explicit one-off multiplier-max is separate. Game-imposed low-dice reductions can still occur. Current regression suite: 146 tests on Windows, Pi and Localnet.

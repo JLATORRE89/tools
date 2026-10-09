@@ -2426,7 +2426,47 @@ def _multiplier_probe_blocked():
         or is_card_popup_screen()  # covers is_purchase_upsell_screen() too
     )
 
-def _probe_multiplier_max():
+def _multiplier_preferences_path():
+    from pathlib import Path
+    configured=os.environ.get('MONOPOLY_PREFERENCES_FILE')
+    return Path(configured) if configured else Path.home()/'.config/monopoly-assist/preferences.json'
+
+
+def _multiplier_mode():
+    import json
+    from pathlib import Path
+    override=os.environ.get('MONOPOLY_MULTIPLIER_MODE')
+    if override is not None:return override if override in {'keep','max'} else 'keep'
+    path=_multiplier_preferences_path()
+    if not path.exists():return 'max'
+    try:
+        if path.stat().st_size>4096:return 'keep'
+        mode=json.loads(path.read_text()).get('multiplier_mode')
+        return mode if mode in {'keep','max'} else 'keep'
+    except (OSError,ValueError,AttributeError):return 'keep'
+
+
+def cmd_multiplier_mode():
+    import json,tempfile
+    from pathlib import Path
+    mode=sys.argv[2] if len(sys.argv)>2 else 'status'
+    if mode=='status':print('Multiplier mode:',_multiplier_mode());return 0
+    if mode not in {'keep','max'}:print('Use multiplier-mode keep, max or status.');return 1
+    path=_multiplier_preferences_path()
+    path.parent.mkdir(parents=True,exist_ok=True)
+    try:
+        data=json.loads(path.read_text()) if path.exists() else {}
+        if not isinstance(data,dict):raise ValueError('Preferences must be an object')
+        data['multiplier_mode']=mode
+        with tempfile.NamedTemporaryFile(mode='w',dir=path.parent,prefix='.multiplier-',delete=False) as f:
+            json.dump(data,f);temporary=Path(f.name)
+        temporary.chmod(0o600);temporary.replace(path)
+    except (OSError,ValueError):print('Preferences could not be safely updated.');return 1
+    print('Multiplier mode set to',mode,'; takes effect on the next check.')
+    return 0
+
+
+def _probe_multiplier_max(respect_mode=True):
     """Bounded, observed cycling to find the multiplier's actual current
     cap - never assumes a fixed x3. Taps once, re-screenshots, and
     compares: as long as the reading keeps climbing, the cap hasn't been
@@ -2450,6 +2490,7 @@ def _probe_multiplier_max():
     taps = 0
     while taps < MULTIPLIER_MAX_PROBE_TAPS:
         screenshot()
+        if respect_mode and _multiplier_mode()=='keep':return None
         if _multiplier_probe_blocked():
             print(f"An unrelated popup/dialog appeared mid-probe; stopping "
                   f"without further tapping (last confirmed value: x{seen_max}).")
@@ -2471,6 +2512,7 @@ def _probe_multiplier_max():
             cur = new_mult
             while cur < seen_max and taps < MULTIPLIER_MAX_PROBE_TAPS:
                 screenshot()
+                if respect_mode and _multiplier_mode()=='keep':return None
                 if _multiplier_probe_blocked():
                     print(f"An unrelated popup/dialog appeared while returning to "
                           f"max; stopping at x{cur} rather than tapping through it.")
@@ -2513,10 +2555,15 @@ def _multiplier_action(tick=0):
         print("Could not read multiplier via OCR. No action taken.")
         return 1
 
+    if _multiplier_mode()=='keep':
+        print(f'Keeping current multiplier x{mult}; no automatic badge taps or maximum probe.')
+        return 0
+
     if _last_die_detected:
         # Game allows selecting x3 with 1 die but resets to x1 on GO.
         # Re-probing that reset causes an endless badge cycle.
         for attempt in range(3):
+            if _multiplier_mode()=='keep':return 0
             if mult == 1:
                 print('Confirmed last die: using x1 without a maximum probe.')
                 return 0
@@ -2558,6 +2605,7 @@ def _multiplier_action(tick=0):
         print(f"Already at observed max (x{known_max}). Not tapping (would reset to x1).")
         return 0
     print("Tapping multiplier to increase.")
+    if _multiplier_mode()=='keep':return 0
     tap(*MULTIPLIER_BADGE)
     return 0
 
@@ -2570,7 +2618,7 @@ def cmd_multiplier_max():
     and report the confirmed max, without relying on or mutating the
     cross-tick cache that cmd_loop() uses (so it's safe to run standalone
     against a live device for verification)."""
-    result = _probe_multiplier_max()
+    result = _probe_multiplier_max(respect_mode=False)
     return 0 if result is not None else 1
 
 def cmd_status():
@@ -2919,6 +2967,7 @@ if __name__ == "__main__":
         "roll": cmd_roll,
         "multiplier": cmd_multiplier,
         "multiplier-max": cmd_multiplier_max,
+        "multiplier-mode": cmd_multiplier_mode,
         "build": cmd_build,
         "match3": cmd_match3,
         "raid": cmd_raid,

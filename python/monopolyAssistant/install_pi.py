@@ -91,6 +91,7 @@ case "${1:-start}" in
         /usr/bin/adb devices
         ;;
     logs) touch "$log"; tail -n 40 -F "$log" ;;
+    mode) /usr/bin/python3 "$HOME/.local/share/monopoly-assist/monopoly-go-assist" multiplier-mode "${2:-status}" ;;
     desktop)
         start_assistant || echo "Startup failed. See the details above."
         echo

@@ -1,5 +1,18 @@
 # Monopoly GO Assistant
 
+## Keep a manually selected multiplier
+
+Use `monopoly mode keep` to let the player choose the badge value. The agent reads
+the verified value but never cycles the badge or probes for a higher maximum.
+Manual changes are respected on later turns. The preference persists and takes
+effect on the next check, including interrupting an automatic probe.
+
+`monopoly mode max` restores bounded automatic maximum discovery; `monopoly mode
+status` shows the policy. The active Pi is configured to **keep** at the user's
+request. A game-imposed reduction when dice are insufficient is still possible;
+the agent does not attempt to undo the game's own limit. No numeric value is
+guessed or forced. Explicit `multiplier-max` remains a deliberate one-off command.
+
 Mini-game introduction dates, scope and Git references are recorded in
 [MINIGAME_HISTORY.md](MINIGAME_HISTORY.md). Use `git log --show-notes` to display
 historical commit comments. The October 9 Halloween title-separator fix is live
