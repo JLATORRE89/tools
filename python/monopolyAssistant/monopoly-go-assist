@@ -1534,6 +1534,59 @@ _HOUSE_POINTS = ((551,850),(310,936),(795,932),(132,1050),(964,1062))
 _house_attempts = {}
 _house_header = None
 
+
+def spooky_express_close_point(image):
+    """Only the observed small grey footer X, never an upgrade/purchase body."""
+    if image.size != (1080,2340): return None
+    points=[]
+    for y in range(2140,2290):
+        for x in range(480,600):
+            c=image.getpixel((x,y))[:3]
+            if 120<min(c) and max(c)<210 and max(c)-min(c)<35:
+                points.append((x,y))
+    if not 250<=len(points)<=2500:return None
+    left,right=min(x for x,y in points),max(x for x,y in points)
+    top,bottom=min(y for x,y in points),max(y for x,y in points)
+    if not (30<=right-left<=75 and 30<=bottom-top<=75):return None
+    cx,cy=(left+right)//2,(top+bottom)//2
+    if sum(abs(abs(x-cx)-abs(y-cy))<=12 for x,y in points)<len(points)*0.8:return None
+    return cx,cy
+
+
+def spooky_express_overview():
+    try: image=screen_image()
+    except (OSError,ValueError):return None
+    close=spooky_express_close_point(image)
+    if close is None:return None
+    title=ocr_region((340,180,980,380),psm=11).upper()
+    progress=ocr_region((360,850,735,1025),psm=6).upper()
+    if not (re.search(r'\bSPOOKY\b',title) and re.search(r'\bEXPRESS\b',title)
+            and re.search(r'\bREACH\b',progress) and re.search(r'\bTO\s+UPGRADE\b',progress)):
+        return None
+    return close
+
+
+_spooky_close_retry=0.0
+
+
+def handle_spooky_express():
+    global _spooky_close_retry
+    close=spooky_express_overview()
+    if close is None:return False
+    report_phase('closing_spooky_express_overview')
+    if time.monotonic()<_spooky_close_retry:
+        time.sleep(2);return True
+    for _ in range(2):
+        if not tap(*close):break
+        time.sleep(1.5);screenshot()
+        close=spooky_express_overview()
+        if close is None:
+            print('Spooky Express progress overview closed; re-evaluating the board.')
+            return True
+    _spooky_close_retry=time.monotonic()+30
+    print('Spooky Express close not confirmed; waiting without upgrade/purchase taps.')
+    return True
+
 def find_house_choices():
     import math
     try:
@@ -2118,6 +2171,8 @@ def sleep_keeping_awake(total_s, interval_s=15):
         elapsed += chunk
         _keep_screen_awake()
         screenshot()
+        if handle_spooky_express():
+            continue
         if handle_treasure():
             continue
         if handle_boutique():
@@ -2625,6 +2680,8 @@ def cmd_loop(interval_s=0.35):
         while True:
             screenshot()
             report_phase("evaluating_screen")
+            if handle_spooky_express():
+                continue
             if handle_treasure():
                 continue
             if handle_boutique():

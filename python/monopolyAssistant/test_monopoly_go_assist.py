@@ -306,6 +306,34 @@ class HalloweenHeaderSeparatorTest(unittest.TestCase):
             self.assertFalse(mga._house_board_title(text))
 
 
+class SpookyExpressOverviewTest(unittest.TestCase):
+    def setUp(self):mga._spooky_close_retry=0.0
+
+    def test_only_small_footer_cross_is_accepted(self):
+        from PIL import Image,ImageDraw
+        image=Image.new('RGB',(1080,2340),(238,234,216));draw=ImageDraw.Draw(image)
+        draw.line((519,2182,560,2230),fill=(185,182,168),width=12)
+        draw.line((560,2182,519,2230),fill=(185,182,168),width=12)
+        point=mga.spooky_express_close_point(image)
+        self.assertIsNotNone(point);self.assertLess(abs(point[0]-540),3);self.assertLess(abs(point[1]-2206),3)
+        draw.rectangle((500,2160,590,2250),fill=(185,182,168))
+        self.assertIsNone(mga.spooky_express_close_point(image))
+
+    def test_exact_event_and_progress_text_required(self):
+        with mock.patch.object(mga,'screen_image'),mock.patch.object(mga,'spooky_express_close_point',return_value=(540,2206)):
+            with mock.patch.object(mga,'ocr_region',side_effect=['SPOOKY EXPRESS FIRST CLASS','Reach 45\nto upgrade']):
+                self.assertEqual(mga.spooky_express_overview(),(540,2206))
+            for title,progress in [('SPOOKY EXPRESS','Buy upgrade $4.99'),('OTHER EXPRESS','Reach 45 to upgrade'),('SPOOKY EXPRES','Reach 45 to upgrade')]:
+                with mock.patch.object(mga,'ocr_region',side_effect=[title,progress]):self.assertIsNone(mga.spooky_express_overview())
+
+    def test_close_is_verified_and_failed_attempts_are_bounded(self):
+        with mock.patch.object(mga,'spooky_express_overview',side_effect=[(540,2206),None]),mock.patch.object(mga,'tap',return_value=True) as tap,mock.patch.object(mga,'screenshot'),mock.patch.object(mga.time,'sleep'):
+            self.assertTrue(mga.handle_spooky_express());tap.assert_called_once_with(540,2206)
+        with mock.patch.object(mga,'spooky_express_overview',return_value=(540,2206)),mock.patch.object(mga,'tap',return_value=True) as tap,mock.patch.object(mga,'screenshot'),mock.patch.object(mga.time,'sleep'):
+            self.assertTrue(mga.handle_spooky_express());self.assertEqual(tap.call_count,2)
+            self.assertTrue(mga.handle_spooky_express());self.assertEqual(tap.call_count,2)
+
+
 class PickABoxOcrMatchTest(unittest.TestCase):
     """_pick_a_box_ocr_matches() is a pure function extracted from
     is_pick_a_box_screen() specifically so its text-matching rule can be

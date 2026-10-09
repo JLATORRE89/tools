@@ -1,5 +1,17 @@
 # Monopoly GO Automation Notes
 
+## 2026-10-09 Spooky Express overview
+
+The observed First Class progress overview displayed 13 points and "Reach 45 to
+upgrade". It replaced the board HUD and defeated generic popup recovery.
+The specific handler precedes generic screen checks in both play and dice-wait
+loops. Require complete SPOOKY and EXPRESS header words, REACH/TO UPGRADE text,
+and the measured small grey cross in the footer. Tap only that detected cross,
+recheck a fresh frame, and allow two attempts before a 30-second cooldown.
+Never tap the upgrade body, buy points, or infer free upgrades from this screen.
+137 tests passed on Windows and Pi; the live close returned to the main board.
+The entry date is recorded separately in MINIGAME_HISTORY.md.
+
 ## 2026-10-09 Halloween title separator recovery
 
 The current house-choice screen was repeatedly sent through BUILD and raid
