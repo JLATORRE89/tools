@@ -297,12 +297,12 @@ def _select_adb_device(text, configured=None):
 
 def _reset_device_game_state():
     global _frame_cache,_frame_signature,_house_header,_dig_level
-    global _BOUTIQUE_LAST_FRAME,_multiplier_preferred_box,_spooky_close_retry
+    global _BOUTIQUE_LAST_FRAME,_multiplier_preferred_box,_spooky_close_retry,_mummy_spent,_mummy_blocked,_mummy_active
     _frame_cache=_frame_signature=None;_ocr_cache.clear()
     _house_header=None;_house_attempts.clear();_dig_level=None;_dig_attempts.clear()
     _treasure_watchdog.reset();_BOUTIQUE_LAST_FRAME=None;_BOUTIQUE_FAILED.clear()
     _multiplier_cache.clear();_multiplier_cache.update(max=None,probed_at_tick=None)
-    _multiplier_preferred_box=None;_spooky_close_retry=0.0
+    _multiplier_preferred_box=None;_spooky_close_retry=0.0;_mummy_spent=0;_mummy_blocked=False;_mummy_active=False
 
 
 def sh(cmd):
@@ -1693,6 +1693,115 @@ def handle_spooky_express():
     print('Spooky Express close not confirmed; waiting without upgrade/purchase taps.')
     return True
 
+
+# Mummy Adventures: measured 1080x2340 tutorial and Scottie Statue, 2026-10-09.
+_mummy_spent = 0
+_mummy_blocked = False
+_mummy_active = False
+
+
+def _mummy_text(box, ink='white'):
+    from PIL import Image
+    im=screen_image().crop(box).convert('RGB')
+    mask=Image.new('L',im.size,255)
+    def selected(c):
+        if ink=='yellow':return c[0]>190 and c[1]>150 and c[2]<140
+        return min(c)>220
+    mask.putdata([0 if selected(c) else 255 for c in im.getdata()])
+    return ocr_image(mask.resize((im.width*3,im.height*3)),psm=7).strip().upper()
+
+
+def _mummy_number(box, white=False):
+    im=screen_image().crop(box)
+    scale=3 if white else 2
+    color=ocr_image(im.resize((im.width*scale,im.height*scale)),psm=7).strip()
+    second=_mummy_text(box) if white else ocr_image(im.convert('L').resize((im.width*scale,im.height*scale)),psm=7).strip()
+    if re.fullmatch(r'\d{1,4}',color) and color==second:return int(color)
+    return None
+
+
+def _mummy_green(image, point):
+    x,y=point
+    for dx,dy in [(-80,25),(80,25),(-80,-15),(80,-15)]:
+        r,g,b=image.getpixel((x+dx,y+dy))[:3]
+        if not (g>140 and g>r*1.25 and g>b*1.3):return False
+    return True
+
+
+def mummy_state():
+    try:image=screen_image()
+    except (OSError,ValueError):return None
+    if image.size!=(1080,2340):return None
+    footer=_mummy_text((320,2110,770,2190)) if _mummy_green(image,(540,2160)) else ''
+    if footer=='CONTINUE':
+        heading=ocr_region((180,560,930,670),psm=7).upper()
+        treasure=ocr_region((150,900,940,1070),psm=6).upper()
+        if 'HOW TO ADVENTURE' in heading or 'TREASURE CHESTS!' in treasure:
+            return {'kind':'tutorial','point':(540,2160)}
+    if footer=='COLLECT':
+        title=ocr_region((260,360,830,650),psm=6).upper()
+        if re.search(r'\bMUMMY\b',title) and re.search(r'\bADVENTURES\b',title):
+            return {'kind':'reward','point':(540,2160)}
+    close=spooky_express_close_point(image)
+    if close is None:return None
+    if (_mummy_text((270,150,810,240),'yellow')=='SCOTTIE STATUE'
+            and ocr_region((290,530,810,595)).strip().upper()=='CLEAR THE STATUE'):
+        state={'kind':'statue','close':close,'tokens':_mummy_number((515,2035,610,2105))}
+        targets=[];costs=[]
+        for x in (370,710):
+            targets.append(_mummy_number((x-60,1500,x+65,1605)))
+            costs.append(_mummy_number((x-20,1680,x+65,1775),white=True))
+        if (costs==[1,3] and all(t is not None and 1<=t<=40 for t in targets)
+                and all(_mummy_green(image,(x,1725)) for x in (370,710))):
+            state['point']=(370,1725)
+        return state
+    header=ocr_region((365,450,870,560),psm=6).upper()
+    if 'WAKE THE MUMMY!' in header and re.search(r'\d+/6\s+OBJECTS COMPLETED',header):
+        return {'kind':'overview','close':close}
+    return None
+
+
+def handle_mummy():
+    global _mummy_spent,_mummy_blocked,_mummy_active
+    state=mummy_state()
+    if state is None:
+        if _mummy_active:
+            if _main_board_footer_matches(ocr_region((0,2020,1080,2340),psm=6)):
+                _mummy_spent=0;_mummy_active=False
+            else:
+                report_phase('mummy_unrecognized_transition')
+                time.sleep(3);return True
+        return False
+    _mummy_active=True
+    report_phase('mummy_adventures')
+    if _mummy_blocked:
+        print('Mummy Adventures outcome uncertain; paused for review, no retry.')
+        time.sleep(3);return True
+    if state['kind'] in ('tutorial','reward'):
+        if tap(*state['point']):time.sleep(2);screenshot()
+        return True
+    if state['kind']=='overview' or state.get('tokens')==0 or _mummy_spent>=5:
+        if tap(*state['close']):time.sleep(2);screenshot()
+        return True
+    tokens=state.get('tokens')
+    if tokens is None or 'point' not in state:
+        print('Mummy Adventures unverified actions/count; pausing without token spend.')
+        time.sleep(3);return True
+    # Exactly one observed one-token option. No chest/paid-refill or three-token taps.
+    if not tap(*state['point']):return True
+    for _ in range(6):
+        time.sleep(2);screenshot()
+        remaining=_mummy_number((515,2035,610,2105))
+        if remaining==tokens-1:
+            _mummy_spent+=1
+            print(f'Mummy Adventures one-token draw verified: {tokens}->{remaining}; success not inferred.')
+            return True
+        if remaining is not None and remaining!=tokens:break
+    _mummy_blocked=True
+    record_diagnostic('mummy_outcome_uncertain')
+    print('Mummy Adventures token reduction not verified; blocking further spending.')
+    return True
+
 def find_house_choices():
     import math
     try:
@@ -2279,6 +2388,8 @@ def sleep_keeping_awake(total_s, interval_s=15):
         elapsed += chunk
         _keep_screen_awake()
         screenshot()
+        if handle_mummy():
+            continue
         if handle_spooky_express():
             continue
         if handle_treasure():
@@ -2836,6 +2947,8 @@ def cmd_loop(interval_s=0.35):
         while True:
             screenshot()
             report_phase("evaluating_screen")
+            if handle_mummy():
+                continue
             if handle_spooky_express():
                 continue
             if handle_treasure():

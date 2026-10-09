@@ -1494,5 +1494,87 @@ class BoutiqueTest(unittest.TestCase):
             self.assertEqual(run.call_args_list[-1].args[0][-3:],['UP','600','1500'])
 
 
+class MummyAdventuresTest(unittest.TestCase):
+    def tearDown(self):
+        mga._mummy_spent=0
+        mga._mummy_blocked=False
+        mga._mummy_active=False
+
+    def setUp(self):
+        mga._mummy_spent=0
+        mga._mummy_blocked=False
+        mga._mummy_active=False
+
+    def test_real_controls_geometry(self):
+        from PIL import Image
+        with Image.open(os.path.join(os.path.dirname(__file__),'fixtures','mummy-statue-controls.png')) as im:
+            self.assertTrue(mga._mummy_green(im,(370,1725)))
+            self.assertTrue(mga._mummy_green(im,(710,1725)))
+            self.assertEqual(mga.spooky_express_close_point(im),(539,2206))
+
+    def test_numeric_disagreement_and_noise_rejected(self):
+        from PIL import Image
+        with mock.patch.object(mga,'screen_image',return_value=Image.new('RGB',(1080,2340))), mock.patch.object(mga,'ocr_image',side_effect=['135','155','"18','18','135','135']):
+            self.assertIsNone(mga._mummy_number((515,2035,610,2105)))
+            self.assertIsNone(mga._mummy_number((310,1500,435,1605)))
+            self.assertEqual(mga._mummy_number((515,2035,610,2105)),135)
+
+    def test_wrong_geometry_never_recognized(self):
+        from PIL import Image
+        with mock.patch.object(mga,'screen_image',return_value=Image.new('RGB',(720,1600))), mock.patch.object(mga,'tap') as tap:
+            self.assertFalse(mga.handle_mummy())
+            tap.assert_not_called()
+
+    def test_verified_one_token_draw(self):
+        state={'kind':'statue','tokens':135,'point':(370,1725),'close':(539,2206)}
+        with mock.patch.object(mga,'mummy_state',return_value=state), mock.patch.object(mga,'_mummy_number',side_effect=[135,134]), mock.patch.object(mga,'tap',return_value=True) as tap, mock.patch.object(mga,'screenshot'), mock.patch.object(mga.time,'sleep'):
+            self.assertTrue(mga.handle_mummy())
+            tap.assert_called_once_with(370,1725)
+            self.assertEqual(mga._mummy_spent,1)
+            self.assertFalse(mga._mummy_blocked)
+
+    def test_uncertain_spend_latches_without_retry(self):
+        state={'kind':'statue','tokens':135,'point':(370,1725),'close':(539,2206)}
+        with mock.patch.object(mga,'mummy_state',return_value=state), mock.patch.object(mga,'_mummy_number',return_value=133), mock.patch.object(mga,'tap',return_value=True) as tap, mock.patch.object(mga,'screenshot'), mock.patch.object(mga,'record_diagnostic'), mock.patch.object(mga.time,'sleep'):
+            mga.handle_mummy()
+            self.assertTrue(mga._mummy_blocked)
+            mga.handle_mummy()
+            tap.assert_called_once()
+
+    def test_zero_tokens_and_visit_budget_close_only(self):
+        for tokens,spent in [(0,0),(100,5)]:
+            mga._mummy_spent=spent
+            with mock.patch.object(mga,'mummy_state',return_value={'kind':'statue','tokens':tokens,'point':(370,1725),'close':(539,2206)}), mock.patch.object(mga,'tap',return_value=True) as tap, mock.patch.object(mga,'screenshot'), mock.patch.object(mga.time,'sleep'):
+                mga.handle_mummy()
+                tap.assert_called_once_with(539,2206)
+
+    def test_unknown_count_or_actions_no_spend(self):
+        for state in [{'kind':'statue','tokens':None,'point':(370,1725)},{'kind':'statue','tokens':135}]:
+            with mock.patch.object(mga,'mummy_state',return_value=state), mock.patch.object(mga,'tap') as tap, mock.patch.object(mga.time,'sleep'):
+                mga.handle_mummy()
+                tap.assert_not_called()
+
+    def test_failed_focus_no_balance_poll(self):
+        with mock.patch.object(mga,'mummy_state',return_value={'kind':'statue','tokens':135,'point':(370,1725)}), mock.patch.object(mga,'tap',return_value=False), mock.patch.object(mga,'_mummy_number') as number:
+            mga.handle_mummy()
+            number.assert_not_called()
+
+    def test_animation_retains_budget_and_blocks_generic_handlers(self):
+        mga._mummy_spent=4;mga._mummy_active=True
+        with mock.patch.object(mga,'mummy_state',return_value=None), mock.patch.object(mga,'ocr_region',return_value=''), mock.patch.object(mga.time,'sleep'):
+            self.assertTrue(mga.handle_mummy())
+            self.assertEqual(mga._mummy_spent,4)
+        with mock.patch.object(mga,'mummy_state',return_value=None), mock.patch.object(mga,'ocr_region',return_value='WINS BUILD ALBUM FRIENDS'), mock.patch.object(mga.time,'sleep'):
+            self.assertFalse(mga.handle_mummy())
+            self.assertEqual(mga._mummy_spent,0)
+
+    def test_device_change_clears_uncertain_state(self):
+        mga._mummy_spent=3
+        mga._mummy_blocked=True
+        mga._reset_device_game_state()
+        self.assertEqual(mga._mummy_spent,0)
+        self.assertFalse(mga._mummy_blocked)
+
+
 if __name__ == '__main__':
     unittest.main()

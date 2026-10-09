@@ -220,3 +220,7 @@ verified before rolling resumes. Empty-dice monitoring does not reopen BUILD
 before checking whether dice returned.
 
 See [September 22 log audit](LOG_AUDIT_20260922.md) for capture/disconnection recovery, popup protections, timestamped status and remaining live checks.
+
+## Mummy Adventures (October 9, 2026)
+
+See [walkthrough](MUMMY_ADVENTURES_WALKTHROUGH.md) for observed tutorials, Scottie Statue calibration and limitations. Supported statue visits use only verified one-token draws, at most five per visit, and check the balance after each action. Later objects, optional chests and full event completion remain unverified.
