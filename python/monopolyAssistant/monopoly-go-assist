@@ -585,6 +585,48 @@ def _is_reticle_white(rgb):
     r, g, b = rgb
     return r > 235 and g > 235 and b > 235
 
+def _reticle_angular_coverage(points,cx,cy,size):
+    import math
+    sectors=set()
+    inside=0
+    for x,y in points:
+        radius=math.hypot(x-cx,y-cy)
+        if radius<size*0.25:inside+=1
+        if size*0.30<=radius<=size*0.70:
+            sectors.add(int((math.atan2(y-cy,x-cx)+math.pi)/math.tau*16)%16)
+    return len(sectors)>=12 and inside<=len(points)*0.12
+
+
+def _red_raid_targets(image):
+    """Observed red circular reticles; exclude filled roof/avatar decorations."""
+    from collections import deque
+    px=image.load();step=3;remaining=set()
+    for y in range(300,min(2140,image.height),step):
+        for x in range(0,image.width,step):
+            r,g,b=px[x,y][:3]
+            if r>210 and r>g+55 and r>b+45:remaining.add((x,y))
+    found=[]
+    while remaining:
+        start=remaining.pop();queue=deque([start]);points=[start]
+        while queue:
+            x,y=queue.popleft()
+            for dx in (-6,-3,0,3,6):
+                for dy in (-6,-3,0,3,6):
+                    point=(x+dx,y+dy)
+                    if point in remaining:
+                        remaining.remove(point);points.append(point);queue.append(point)
+        xs=[p[0] for p in points];ys=[p[1] for p in points]
+        w,h=max(xs)-min(xs),max(ys)-min(ys)
+        cx,cy=(min(xs)+max(xs))//2,(min(ys)+max(ys))//2
+        if (100<=w<=205 and 100<=h<=205 and abs(w-h)<=35 and len(points)>=80
+                and _reticle_angular_coverage(points,cx,cy,max(w,h))):
+            found.append((w*h,(cx,cy)))
+    targets=[]
+    for _,point in sorted(found,reverse=True):
+        if not any(abs(point[0]-old[0])<35 and abs(point[1]-old[1])<35 for old in targets):targets.append(point)
+    return targets
+
+
 def find_raid_targets():
     """Locates the glowing white circular target reticles via a
     connected-components blob scan, restricted to the board content area
@@ -600,6 +642,8 @@ def find_raid_targets():
     from collections import deque
 
     img = screen_image()
+    red_targets=_red_raid_targets(img)
+    if red_targets:return red_targets
     w, h = img.size
     px = img.load()
     step = 3
@@ -638,8 +682,10 @@ def find_raid_targets():
         ys = [p[1] for p in comp]
         cw = max(xs) - min(xs)
         ch = max(ys) - min(ys)
-        if 100 <= cw <= 200 and 100 <= ch <= 200 and abs(cw - ch) <= 40 and len(comp) >= 400:
-            targets.append(((min(xs) + max(xs)) // 2, (min(ys) + max(ys)) // 2))
+        center=((min(xs)+max(xs))//2,(min(ys)+max(ys))//2)
+        if (100 <= cw <= 200 and 100 <= ch <= 200 and abs(cw - ch) <= 40
+                and len(comp) >= 400 and _reticle_angular_coverage(comp,*center,max(cw,ch))):
+            targets.append(center)
     return targets
 
 def _drain_collect_popups(max_extra=6):

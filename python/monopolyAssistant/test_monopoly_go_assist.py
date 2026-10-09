@@ -1039,6 +1039,32 @@ class LogAuditRecoveryTests(unittest.TestCase):
             mga.close_build_menu()
             self.assertEqual(tap.call_count,4)
 
+class RaidReticleGeometryTests(unittest.TestCase):
+    def test_red_ring_is_selected_instead_of_white_building_cross(self):
+        from PIL import Image,ImageDraw
+        image=Image.new('RGB',(1080,2340),(5,30,70));draw=ImageDraw.Draw(image)
+        draw.ellipse((170,1405,330,1565),outline=(255,100,95),width=5)
+        draw.line((920,1980,1060,2120),fill='white',width=35)
+        draw.line((1060,1980,920,2120),fill='white',width=35)
+        with mock.patch.object(mga,'screen_image',return_value=image):
+            self.assertEqual(mga.find_raid_targets(),[(250,1485)])
+
+    def test_white_cross_and_filled_red_square_are_not_reticles(self):
+        from PIL import Image,ImageDraw
+        image=Image.new('RGB',(1080,2340),'black');draw=ImageDraw.Draw(image)
+        draw.line((920,1980,1060,2120),fill='white',width=35)
+        draw.line((1060,1980,920,2120),fill='white',width=35)
+        draw.rectangle((300,800,450,950),fill=(255,100,95))
+        with mock.patch.object(mga,'screen_image',return_value=image):self.assertEqual(mga.find_raid_targets(),[])
+
+    def test_legacy_white_circle_remains_supported(self):
+        from PIL import Image,ImageDraw
+        image=Image.new('RGB',(1080,2340),'black');ImageDraw.Draw(image).ellipse((200,800,350,950),outline='white',width=15)
+        with mock.patch.object(mga,'screen_image',return_value=image):targets=mga.find_raid_targets()
+        self.assertEqual(len(targets),1)
+        self.assertLess(abs(targets[0][0]-275),3);self.assertLess(abs(targets[0][1]-875),3)
+
+
 class ManualMultiplierModeTests(unittest.TestCase):
     def test_manual_changes_are_kept_without_probe_or_badge_taps(self):
         with mock.patch.dict(os.environ,MONOPOLY_MULTIPLIER_MODE='keep'),mock.patch.object(mga,'get_multiplier',side_effect=[(5,'x5'),(2,'x2')]),mock.patch.object(mga,'_probe_multiplier_max') as probe,mock.patch.object(mga,'tap') as tap:

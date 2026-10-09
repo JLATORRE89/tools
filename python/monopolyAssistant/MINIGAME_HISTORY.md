@@ -8,7 +8,7 @@ working tree until the October 9 maintenance snapshot.
 
 | Mini-game type | Earliest documented support | Git evidence and later changes |
 | --- | --- | --- |
-| Raid / heist target selection | September 6, 2026 | Present in `f229c71`; fresh foreground checks and bounded target handling retained. |
+| Raid / heist target selection | September 6, 2026 | Present in `f229c71`; fresh foreground checks and bounded target handling retained. October 9, 2026: space-themed red reticles distinguished from white background crosses; live COLLECT recovery verified. |
 | Match-3 tile reveal | September 6, 2026 | Present in `f229c71`; the original handoff describes automated tile reveal. |
 | Jail / bonus-roll screen | September 6, 2026 | Present in `f229c71`; specific purple-roll handling precedes generic popup detection. |
 | Color Wheel | September 7, 2026 | Present in `f229c71`; blue SPIN layout documented September 19; title/count verification improved October 6. |
