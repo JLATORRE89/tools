@@ -1,0 +1,71 @@
+#!/usr/bin/env bash
+# Runs monopoly-go-assist loop continuously overnight, auto-restarting it
+# if it ever crashes (e.g. a transient adb error), with timestamped,
+# unbuffered logging so progress can be checked (tail -f) while running.
+set -uo pipefail
+
+LOG_DIR="$HOME/ai-logs"
+mkdir -p "$LOG_DIR"
+LOG="$LOG_DIR/monopoly-go-assist-$(date +%Y%m%d).log"
+PIDFILE=/tmp/monopoly-go-supervisor.pid
+
+usage() {
+  echo "Usage: monopoly-go-supervisor {start|stop|status}"
+  echo
+  echo "start  - run monopoly-go-assist loop in the background, restarting"
+  echo "         it automatically if it ever exits/crashes, until stopped"
+  echo "stop   - stop the supervisor and the loop it's running"
+  echo "status - check if the supervisor is currently running"
+  echo
+  echo "Log: $LOG_DIR/monopoly-go-assist-YYYYMMDD.log"
+}
+
+cmd="${1:-}"
+
+case "$cmd" in
+  start)
+    if [[ -f "$PIDFILE" ]] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null; then
+      echo "Supervisor already running (PID $(cat "$PIDFILE"))."
+      exit 0
+    fi
+    (
+      while true; do
+        echo "$(date '+%F %T') - (re)starting monopoly-go-assist loop" >> "$LOG"
+        PYTHONUNBUFFERED=1 python3 "$HOME/bin/monopoly-go-assist" loop >> "$LOG" 2>&1
+        code=$?
+        echo "$(date '+%F %T') - loop exited (code $code), restarting in 10s" >> "$LOG"
+        sleep 10
+      done
+    ) &
+    echo $! > "$PIDFILE"
+    disown
+    echo "Supervisor started (PID $(cat "$PIDFILE"))."
+    echo "Log: $LOG"
+    ;;
+  stop)
+    if [[ ! -f "$PIDFILE" ]]; then
+      echo "Supervisor not running."
+      exit 1
+    fi
+    sup_pid="$(cat "$PIDFILE")"
+    rm -f "$PIDFILE"
+    kill "$sup_pid" 2>/dev/null || true
+    loop_pid="$(pgrep -f "bin/monopoly-go-assist loop" | head -1 || true)"
+    if [[ -n "$loop_pid" ]]; then
+      kill "$loop_pid" 2>/dev/null || true
+    fi
+    echo "Supervisor and loop stopped."
+    ;;
+  status)
+    if [[ -f "$PIDFILE" ]] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null; then
+      echo "Supervisor running (PID $(cat "$PIDFILE"))."
+      tail -5 "$LOG" 2>/dev/null
+    else
+      echo "Supervisor not running."
+    fi
+    ;;
+  *)
+    usage
+    exit 1
+    ;;
+esac

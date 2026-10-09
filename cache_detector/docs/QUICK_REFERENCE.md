@@ -43,7 +43,7 @@ python3 proxy_cache_detector.py purge-varnish https://example.com/page
 python3 proxy_cache_detector.py purge-varnish https://example.com --cache-tags "tag1,tag2"
 
 # Custom host/port
-python3 proxy_cache_detector.py purge-varnish https://example.com --host 192.168.1.10 --port 6081
+python3 proxy_cache_detector.py purge-varnish https://example.com --host 192.0.2.10 --port 6081
 ```
 
 ### Purge Nginx

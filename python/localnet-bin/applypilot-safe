@@ -1,0 +1,35 @@
+#!/usr/bin/env bash
+# Bridge from Open WebUI (via local-bin-mcp) into ApplyPilot.
+#
+# Exposes status/doctor/run/apply. "apply" submits REAL job applications
+# when not run with --dry-run - the model can trigger this directly.
+# "init" (interactive setup) is not reachable through this wrapper.
+set -euo pipefail
+
+ALLOWED=("status" "doctor" "run" "apply")
+sub="${1:-}"
+
+usage() {
+  echo "Usage: applypilot-safe {status|doctor|run|apply} [args...]"
+  echo
+  echo "status  - show pipeline statistics (jobs discovered/scored/tailored/applied)"
+  echo "doctor  - check environment/config health"
+  echo "run     - run discovery/scoring/tailoring pipeline stages (discover, enrich,"
+  echo "          score, tailor, cover, pdf, or all); supports --dry-run"
+  echo "apply   - submit job applications (SUBMITS REAL APPLICATIONS unless --dry-run"
+  echo "          is passed); supports --limit, --dry-run, --url"
+}
+
+allowed=false
+for a in "${ALLOWED[@]}"; do
+  [[ "$sub" == "$a" ]] && allowed=true
+done
+
+if [[ "$allowed" != true ]]; then
+  usage
+  exit 1
+fi
+
+export PATH="$HOME/.npm-global/bin:$PATH"
+source /ai/ApplyPilot/.venv/bin/activate
+exec applypilot "$@"

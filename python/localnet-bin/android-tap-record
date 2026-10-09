@@ -1,0 +1,43 @@
+#!/usr/bin/env bash
+# Taps a coordinate on the connected Android device and records a
+# before/after screenshot pair plus a JSONL log entry, for building a
+# UI-interaction training dataset (works against the emulator or a real
+# phone - whatever adb currently sees).
+set -euo pipefail
+
+ADB=/ai/android-sdk/platform-tools/adb
+OUT_DIR="${ANDROID_TAP_LOG_DIR:-/ai/android-training-data}"
+mkdir -p "$OUT_DIR"
+
+x="${1:-}"
+y="${2:-}"
+label="${3:-tap}"
+
+if [[ -z "$x" || -z "$y" ]]; then
+  echo "Usage: android-tap-record <x> <y> [label]"
+  echo "Captures a screenshot, taps (x,y), captures another screenshot,"
+  echo "and appends a log entry to $OUT_DIR/log.jsonl"
+  exit 1
+fi
+
+if ! "$ADB" devices | grep -q "[[:space:]]device$"; then
+  echo "No connected device/emulator found."
+  exit 1
+fi
+
+ts="$(date +%Y%m%d-%H%M%S-%N)"
+safe_label="$(echo "$label" | tr -c "[:alnum:]_-" "_")"
+before="$OUT_DIR/${ts}_${safe_label}_before.png"
+after="$OUT_DIR/${ts}_${safe_label}_after.png"
+
+"$ADB" exec-out screencap -p > "$before"
+"$ADB" shell input tap "$x" "$y"
+sleep 0.6
+"$ADB" exec-out screencap -p > "$after"
+
+printf after:%sn \
+  "$ts" "$label" "$x" "$y" "$before" "$after" >> "$OUT_DIR/log.jsonl"
+
+echo "Recorded tap($x,$y) [$label]"
+echo "  before: $before"
+echo "  after:  $after"

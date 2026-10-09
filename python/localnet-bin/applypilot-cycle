@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+# Runs the full ApplyPilot cycle: discover/score/tailor, show status, preview
+# apply, then ask for confirmation before submitting real applications.
+set -euo pipefail
+source /ai/ApplyPilot/.venv/bin/activate
+
+echo "=== Discovering, scoring, and tailoring jobs ==="
+applypilot run
+
+echo
+echo "=== Pipeline status ==="
+applypilot status
+
+echo
+echo "=== Dry-run preview of apply (no real submissions) ==="
+applypilot apply --dry-run
+
+echo
+read -r -p "Proceed with a REAL apply run (limit 5)? [y/N] " confirm
+if [[ "$confirm" =~ ^[Yy]$ ]]; then
+  applypilot apply --limit 5
+else
+  echo "Skipped. Re-run \"applypilot apply --limit 5\" yourself when ready."
+fi

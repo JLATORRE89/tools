@@ -28,6 +28,16 @@ app = FastAPI(
     version="1.1.0"
 )
 
+from sensitive_paths import is_sensitive_public_path
+
+
+@app.middleware("http")
+async def block_sensitive_public_paths(request: Request, call_next):
+    if is_sensitive_public_path(request.url.path):
+        # HTTPException outside FastAPI's exception layer can become a500.
+        return JSONResponse(status_code=404, content={"detail": "Not found"})
+    return await call_next(request)
+
 # Enable CORS for all origins (customize as needed)
 app.add_middleware(
     CORSMiddleware,

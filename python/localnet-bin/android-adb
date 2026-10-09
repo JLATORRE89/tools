@@ -1,0 +1,72 @@
+#!/usr/bin/env bash
+# Bridge from Open WebUI (via local-bin-mcp) to adb device control.
+# Restricted to a safe subcommand allowlist - excludes fastboot/bootloader/
+# root-level operations that could damage a real physical device if one is
+# ever plugged in.
+set -euo pipefail
+
+ADB=/ai/android-sdk/platform-tools/adb
+ALLOWED=("devices" "install" "uninstall" "logcat" "shell" "get-state" "reboot" \
+         "home" "back" "recents" "pair" "connect" "disconnect")
+
+usage() {
+  echo "Usage: android-adb <subcommand> [args...]"
+  echo
+  echo "Allowed: ${ALLOWED[*]}"
+  echo "(fastboot / bootloader-level operations are not exposed here)"
+  echo
+  echo "home/back/recents send the navigation keyevent directly via adb -"
+  echo "use these instead of the emulator's on-screen buttons or host keyboard"
+  echo "keys, since RDP-forwarded key/click events to the emulator window are"
+  echo "unreliable; adb keyevents go straight to the guest and always work."
+  echo
+  echo "pair/connect/disconnect are for a real phone over Wireless debugging:"
+  echo "  android-adb pair <ip>:<pairing-port> <pairing-code>"
+  echo "  android-adb connect <ip>:<port>"
+  echo "  android-adb disconnect [<ip>:<port>]"
+}
+
+sub="${1:-}"
+if [[ -z "$sub" ]]; then
+  usage
+  exit 1
+fi
+
+allowed=false
+for a in "${ALLOWED[@]}"; do
+  [[ "$sub" == "$a" ]] && allowed=true
+done
+if [[ "$allowed" != true ]]; then
+  usage
+  exit 1
+fi
+
+case "$sub" in
+  logcat)
+    shift
+    exec "$ADB" logcat -d "$@"
+    ;;
+  home)
+    exec "$ADB" shell input keyevent KEYCODE_HOME
+    ;;
+  back)
+    exec "$ADB" shell input keyevent KEYCODE_BACK
+    ;;
+  recents)
+    exec "$ADB" shell input keyevent KEYCODE_APP_SWITCH
+    ;;
+  pair)
+    shift
+    exec "$ADB" pair "$@"
+    ;;
+  connect)
+    shift
+    exec "$ADB" connect "$@"
+    ;;
+  disconnect)
+    shift
+    exec "$ADB" disconnect "$@"
+    ;;
+esac
+
+exec "$ADB" "$@"
