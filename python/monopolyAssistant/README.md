@@ -1,15 +1,73 @@
 # Monopoly GO Assistant
 
+Mini-game introduction dates, scope and Git references are recorded in
+[MINIGAME_HISTORY.md](MINIGAME_HISTORY.md). Use `git log --show-notes` to display
+historical commit comments. The October 9 Halloween title-separator fix is live
+verified; details are in RULES.md.
+
+The active installation is on **rpi3**, using the user service
+`monopoly-assist.service`. Windows source is in this repository; LocalNet
+retains synchronized fallback copies and stays inactive while the phone is
+connected to the Pi. The Pi runtime uses `/usr/bin/adb`; the LocalNet runtime
+uses `/ai/android-sdk/platform-tools/adb`. Current scope and validation are
+recorded in `RULES.md` and `TASKS.md`.
+
+Side-icon free items: the source checks visible FREE labels on both sides during
+play and dice waiting, then claims only separately verified free gift buttons.
+Paid, locked, conditional, mixed-price or unreadable offers are skipped. Checks
+have a five-minute cooldown and one bounded icon visit at a time. Current scope
+and pending live Pi validation are in RULES.md. No automatic purchases or use
+of paid inventory is added.
+
+## Raspberry Pi desktop installation
+
+On Raspberry Pi OS / Debian, install `python3`, `python3-pil`, `adb`,
+`tesseract-ocr`, `tesseract-ocr-eng`, `python3-tesserocr`, `android-sdk-platform-tools-common`,
+and `desktop-file-utils`. Copy `install_pi.py`, `monopoly-go-assist`,
+`test_monopoly_go_assist.py`, and `RULES.md` to a staging folder on the Pi,
+then run `python3 install_pi.py` as the desktop user, without sudo.
+
+The installer runs the regression suite against the installed copy, adapts
+only its ADB path to `/usr/bin/adb`, and creates a **Monopoly Assist** desktop
+launcher plus a `monopoly` Bash alias. Open a new terminal or run
+`source ~/.bash_aliases` in an existing one.
+
+- `monopoly` starts one background instance; repeated launches reuse it.
+- `monopoly stop` stops it.
+- `monopoly status` shows service/device status and recent logs.
+- `monopoly logs` follows the log; Ctrl+C exits the log viewer.
+
+The user service is not enabled at boot. Runtime logs are stored at
+`~/.local/state/monopoly-assist/assistant.log`; installed code, usage notes,
+and regression results are in `~/.local/share/monopoly-assist/`.
+Connect the calibrated phone over USB, approve USB debugging on that phone,
+and bring the unlocked game to the foreground. Installation verification
+without the phone does not establish live gameplay performance.
+
+The Pi service enables `MONOPOLY_INPROCESS_OCR=1`: a reusable Tesseract
+engine avoids loading the language model for every crop. Each image clears
+recognition/adaptive state and has a 30-second recognition timeout. If the
+optional binding is unavailable, command-line OCR remains the fallback.
+Other deployments retain command-line OCR unless explicitly enabled.
+
+The Pi also enables minute-level capture/OCR timing logs and diagnostic
+screenshots for persistent unknown popups, unreadable multipliers, and raid
+reward timeouts. Diagnostics are under
+`~/.local/state/monopoly-assist/diagnostics/`, limited to twelve screenshots
+and one capture per failure type per minute. Disable them with
+`MONOPOLY_DIAGNOSTICS=0`; timing logs use `MONOPOLY_METRICS=0`.
+Multiplier OCR results are reused only within the same captured frame;
+each new frame still requires two complete agreeing readings.
+
 Automates the repetitive parts of playing "Monopoly GO" (`com.scopely.monopolygo`)
 on a real Android phone connected over USB: rolling dice, bumping the reward
 multiplier, buying building upgrades, playing the match-3 mini-game, handling
 raids, dismissing card popups and bonus events, and running unattended for
 hours at a time.
 
-This is a **copy** of the live application. The canonical, actively-deployed
-copy runs on `localnet` (an Ubuntu 24.04 box on the LAN) at `~/bin/`. This
-folder is a snapshot for reference/version history on the Windows side — to
-actually run it, deploy these files to `localnet` (see "Deploying" below).
+This folder contains the maintained source and regression tests. Deployment
+instructions below for LocalNet describe the fallback installation; the Pi
+installation and launcher are described above.
 
 There is no accessibility API or UI tree available for this game (confirmed
 via `uiautomator dump` — it's a single opaque `unitySurfaceView`), so
@@ -99,7 +157,10 @@ even though it works fine from an interactive login shell.
 ## What it handles automatically
 
 - Rolling (single-tap whenever the roll pill isn't empty)
-- The reward multiplier (taps to increase, never resets past the x3 cap)
+- The reward multiplier (taps to increase toward its currently-available
+  cap, discovered live via bounded observed cycling rather than assumed
+  fixed at x3 - see "Multiplier max" in `RULES.md`; run
+  `monopoly-go-assist multiplier-max` to check/settle it manually)
 - Building upgrades (opens BUILD the instant its red badge shows something
   pending, not on a fixed timer)
 - The match-3 "steal" mini-game (auto-detects and plays it blind)
@@ -119,3 +180,15 @@ See `RULES.md` for the full detail behind every one of these, including
 exact calibrated coordinates, color thresholds, and known remaining gaps
 (raid smoke-avoidance, the "board complete" green GO! button is still
 uncalibrated, etc).
+
+Performance update: screen checks reuse a decoded frame, tiny nonempty dice fills
+are recognized, and empty-dice monitoring rechecks every 15 seconds. Normal
+idle polling is 0.35 seconds; game animations and safe multiplier verification
+still take time. See RULES.md for measured scope and live validation.
+
+Build recovery update: themed menus are also recognized by their city/progress
+footer. Build visits are bounded and have a 30-second cooldown; closing is
+verified before rolling resumes. Empty-dice monitoring does not reopen BUILD
+before checking whether dice returned.
+
+See [September 22 log audit](LOG_AUDIT_20260922.md) for capture/disconnection recovery, popup protections, timestamped status and remaining live checks.

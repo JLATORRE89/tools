@@ -4,7 +4,52 @@ monopoly-go-assist: reads on-screen state via OCR and applies the confirmed
 threshold rules for rolling / multiplier tapping. See /ai/monopolygo/RULES.md
 for the full mechanics writeup and why coordinates need periodic recalibration.
 """
-import subprocess, sys, re, time
+import subprocess, sys, re, time, os
+import builtins
+from datetime import datetime
+
+# Timestamp every event, not only supervisor restarts.
+def print(*args, **kwargs):
+    kwargs.setdefault('flush', True)
+    builtins.print(datetime.now().astimezone().isoformat(timespec='seconds'), *args, **kwargs)
+
+_continuous_mode = False
+_phase = None
+_phase_since = 0.0
+_phase_reported = 0.0
+_performance = {}
+_performance_reported = 0.0
+
+
+def record_timing(name, elapsed):
+    count, total = _performance.get(name, (0, 0.0))
+    _performance[name] = (count + 1, total + elapsed)
+
+
+def report_performance(now):
+    global _performance_reported
+    if os.environ.get('MONOPOLY_METRICS') != '1' or now - _performance_reported < 60:
+        return
+    if _performance:
+        print('PERF ' + ' '.join(f'{name}_count={n} {name}_avg_s={seconds/n:.3f}'
+                                for name, (n, seconds) in sorted(_performance.items())))
+        _performance.clear()
+    _performance_reported = now
+
+def report_phase(name):
+    global _phase, _phase_since, _phase_reported
+    now = time.monotonic()
+    report_performance(now)
+    if name != _phase:
+        if _phase is not None:
+            print(f'STATE_END {_phase} elapsed_s={now - _phase_since:.1f}')
+        _phase, _phase_since = name, now
+        print(f'STATE_BEGIN {name}')
+        _phase_reported = now
+    elif now - _phase_reported >= 60:
+        print(f'STATE_HEARTBEAT {name} elapsed_s={now - _phase_since:.1f}')
+        _phase_reported = now
+
 
 ADB = "/ai/android-sdk/platform-tools/adb"
 GO_BUTTON = (539, 1901)
@@ -19,8 +64,12 @@ BUILD_CLOSE_X = (538, 2267)
 GENERIC_BOTTOM_CLOSE_X = (538, 2267)
 BUILD_CARD_Y = 1966
 BUILD_CARD_XS = (111, 326, 541, 756, 971)
-SCREENSHOT = "/tmp/mg_screen.png"
-_RAW_SCREENSHOT = "/tmp/mg_screen.raw"
+import tempfile, atexit, shutil
+_TEMP_DIR = tempfile.mkdtemp(prefix='monopoly-assist-')
+atexit.register(shutil.rmtree, _TEMP_DIR, ignore_errors=True)
+SCREENSHOT = os.path.join(_TEMP_DIR, 'screen.png')
+_RAW_SCREENSHOT = os.path.join(_TEMP_DIR, 'screen.raw')
+_CROP = os.path.join(_TEMP_DIR, 'crop.png')
 
 # Roll-count pill: color-based fill-ratio heuristic (tesseract OCR proved
 # unreliable on this stylized font - see RULES.md). Blue fill vs dark-olive
@@ -32,6 +81,24 @@ ROLL_PILL_X_END = 703
 ROLL_RATIO_EMPTY = 0.03  # below this ~= genuinely 0/0, not just "low"
 ROLL_EMPTY_BACKOFF_S = 7200  # 2h: let ~10 rolls bank up before resuming,
                              # rather than waking for every single roll
+
+# Multiplier cap: NOT assumed fixed. x1->x2->x3 was the only cycle ever
+# observed as of 2026-09-19, but the game is known to run limited-time
+# boosted-rewards events, and nothing here guarantees x3 stays the ceiling
+# forever - so the actual cap is discovered live (see _probe_multiplier_max())
+# by tapping until the reading wraps back down, rather than hardcoded.
+# MULTIPLIER_SANITY_MAX is just a garbage-OCR guard (reject any reading
+# above this as unreadable), not a believed real cap.
+MULTIPLIER_SANITY_MAX = 1000
+MULTIPLIER_MAX_PROBE_TAPS = 30  # hard bound so a persistent OCR glitch that
+                                 # always reads "higher" can't tap forever
+MULTIPLIER_PROBE_SETTLE_S = 2.0  # let the tap's badge-update animation
+                                  # finish before re-reading it
+MULTIPLIER_REPROBE_TICKS = 692  # ~15min at loop interval_s=1.3 - periodically
+                                 # re-confirms the cap hasn't changed (e.g. a
+                                 # boosted-rewards event started) without
+                                 # re-probing (and thus briefly dropping to
+                                 # x1 while re-climbing) on every single tick
 
 # Match-3 mini-game tile grid (4 cols x 3 rows). Face-down tiles show a
 # distinctive gold/tan card-back; used both to tap them (cmd_match3) and to
@@ -114,9 +181,8 @@ WINS_ICON = (75, 2172)
 # graphic, not the dedicated SPIN button), so this is checked before that
 # generic branch. Gate: the green "COLOR WHEEL" title banner, calibrated
 # point (700,420), color (116,160,94) - confirmed no false positives.
-# SPIN_BUTTON tap point (539,1859) is safe to tap unconditionally even
-# once the daily spin is exhausted (confirmed live: the button just
-# appears greyed out and re-tapping it is a harmless no-op).
+# SPIN_BUTTON (539,1859) is used only after Color Wheel title verification.
+# Green scenery or milestone badges alone never authorize a spin tap.
 COLOR_WHEEL_CHECK_POINT = (700, 420)
 SPIN_BUTTON = (539, 1859)
 
@@ -202,119 +268,213 @@ RANDOM_PLAYER_GO_BUTTON = (847, 1060)
 # X buttons ~30-70px apart from each other.
 
 def sh(cmd):
-    return subprocess.run(cmd, shell=True, capture_output=True, text=True)
+    try:
+        return subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=30)
+    except subprocess.TimeoutExpired:
+        print('Command timed out; treating result as unavailable.')
+        return subprocess.CompletedProcess(cmd, 124, '', 'timeout')
 
 def is_device_connected():
     """True iff adb currently sees exactly one authorized, ready device."""
     result = sh(f"{ADB} get-state")
     return result.returncode == 0 and result.stdout.strip() == "device"
 
-def screenshot():
-    """Captures via raw (uncompressed) screencap instead of -p (PNG) -
-    confirmed live 2026-09-11 this is ~2.2x faster overall (~540ms vs
-    ~1190ms measured average), even after re-encoding to PNG locally
-    afterward to keep every existing Image.open(SCREENSHOT) call site
-    unchanged. Counterintuitive but confirmed: raw transfers ~6x more
-    bytes (10.1MB vs 1.58MB) yet is still faster, because the phone's own
-    on-device PNG-encoding CPU cost dominates the -p approach's total
-    time - USB bandwidth was never the bottleneck. Raw format: 16-byte
-    header (width, height, format, extra - all uint32 LE) then raw
-    RGBA8888 pixel data - verified against a real screenshot (colors and
-    content both correct, not byte-swapped) before deploying.
+_frame_cache = None
+_frame_signature = None
+_ocr_cache = {}
 
-    Checks for a missing/disconnected device before trusting the captured
-    bytes (2026-09-13: a struct.unpack crash on truncated data was the
-    only symptom of an unplugged phone, spamming an unreadable traceback
-    to the log every ~10s via the supervisor's auto-restart) so that case
-    exits with one clear message instead."""
-    sh(f"{ADB} exec-out screencap > {_RAW_SCREENSHOT}")
+
+def screen_image():
+    """Decode each captured frame once; invalidate on file replacement/change."""
+    global _frame_cache, _frame_signature
     from PIL import Image
+    stat = os.stat(SCREENSHOT)
+    signature = (SCREENSHOT, stat.st_mtime_ns, stat.st_size, stat.st_ino)
+    if signature != _frame_signature:
+        with Image.open(SCREENSHOT) as image:
+            _frame_cache = image.convert("RGB")
+        _frame_signature = signature
+        _ocr_cache.clear()
+    return _frame_cache
+
+
+def decode_raw_frame(data):
+    """Reject partial, rotated, or unsupported captures before any pixel access."""
     import struct
-    with open(_RAW_SCREENSHOT, "rb") as f:
-        data = f.read()
-    if len(data) < 16:
-        if not is_device_connected():
-            print("\nERROR: No Android device connected via adb.\n"
-                  "Reconnect the phone's USB cable, unlock its screen, and accept\n"
-                  "any 'Allow USB debugging?' prompt, then restart this script.",
-                  file=sys.stderr)
-        else:
-            print(f"\nERROR: adb screencap returned only {len(data)} bytes "
-                  "(expected at least a 16-byte header) even though a device "
-                  "is connected. Screen may be locked/off, or adb may need a "
-                  "restart (adb kill-server && adb start-server).",
-                  file=sys.stderr)
-        sys.exit(1)
-    w, h, fmt, extra = struct.unpack("<IIII", data[:16])
-    img = Image.frombuffer("RGBA", (w, h), data[16:], "raw", "RGBA", 0, 1).convert("RGB")
-    img.save(SCREENSHOT)
+    from PIL import Image
+    if len(data) < 12:
+        raise ValueError('capture header missing')
+    w, h, fmt = struct.unpack('<III', data[:12])
+    if (w, h) != (1080, 2340) or fmt != 1:
+        raise ValueError('unsupported capture geometry or pixel format')
+    payload = w * h * 4
+    header = len(data) - payload
+    if header not in (12, 16):
+        raise ValueError('capture pixel payload incomplete')
+    return Image.frombytes('RGBA', (w, h), data[header:]).convert('RGB')
+
+
+def screenshot():
+    """Wait safely on disconnects; never publish or act on a partial frame."""
+    global _frame_cache, _frame_signature
+    while True:
+        try:
+            measured_at = time.monotonic() if os.environ.get('MONOPOLY_METRICS') == '1' else None
+            if not is_device_connected():
+                raise ConnectionError('device disconnected or not authorized')
+            if _continuous_mode:
+                focus = subprocess.run([ADB, 'shell', 'dumpsys', 'window'],
+                                       capture_output=True, text=True, timeout=5)
+                if focus.returncode or not _game_has_focus(focus.stdout):
+                    report_phase('waiting_for_game_focus')
+                    time.sleep(15)
+                    continue
+            result = subprocess.run([ADB, 'exec-out', 'screencap'],
+                                    capture_output=True, timeout=15)
+            if result.returncode:
+                raise ValueError('capture command failed')
+            img = decode_raw_frame(result.stdout)
+            temporary = SCREENSHOT + '.next.png'
+            img.save(temporary, compress_level=1)
+            os.replace(temporary, SCREENSHOT)
+            stat = os.stat(SCREENSHOT)
+            _frame_cache = img
+            _frame_signature = (SCREENSHOT, stat.st_mtime_ns, stat.st_size, stat.st_ino)
+            _ocr_cache.clear()
+            if measured_at is not None:
+                record_timing('capture', time.monotonic() - measured_at)
+            if _phase in ('waiting_for_device', 'waiting_for_game_focus', 'capture_unavailable'):
+                report_phase('evaluating_screen')
+            return
+        except (OSError, ValueError, subprocess.TimeoutExpired) as exc:
+            if not _continuous_mode:
+                print(f'Capture unavailable: {exc}', file=sys.stderr)
+                raise SystemExit(1)
+            report_phase('waiting_for_device' if isinstance(exc, ConnectionError) else 'capture_unavailable')
+            time.sleep(15)
+
+
+_ocr_api = None
+
+
+def ocr_image(image, psm=7, tsv=False):
+    measured_at = time.monotonic() if os.environ.get('MONOPOLY_METRICS') == '1' else None
+    try:
+        return _recognize_image(image, psm, tsv)
+    finally:
+        if measured_at is not None:
+            record_timing('ocr', time.monotonic() - measured_at)
+
+
+def _recognize_image(image, psm=7, tsv=False):
+    """Optional reusable engine; fresh recognition state for every image."""
+    global _ocr_api
+    if os.environ.get('MONOPOLY_INPROCESS_OCR') == '1':
+        try:
+            if _ocr_api is None:
+                from tesserocr import PyTessBaseAPI
+                _ocr_api = PyTessBaseAPI(
+                    path=os.environ.get('TESSDATA_PREFIX', '/usr/share/tesseract-ocr/5/tessdata'),
+                    lang='eng')
+                _ocr_api.SetVariable('debug_file', os.devnull)
+                atexit.register(_ocr_api.End)
+            _ocr_api.Clear()
+            _ocr_api.ClearAdaptiveClassifier()
+            _ocr_api.SetPageSegMode(psm)
+            _ocr_api.SetImage(image)
+            if not _ocr_api.Recognize(timeout=30000):
+                return ''
+            return _ocr_api.GetTSVText(0) if tsv else _ocr_api.GetUTF8Text().strip()
+        except (ImportError, RuntimeError, OSError) as exc:
+            print(f'In-process OCR unavailable: {exc}; using command-line OCR.')
+    image.save(_CROP)
+    suffix = ' tsv' if tsv else ''
+    return sh(f"tesseract {_CROP} - --psm {psm}{suffix} 2>/dev/null").stdout.strip()
+
 
 def ocr_region(box, psm=7):
     from PIL import Image
-    img = Image.open(SCREENSHOT)
+    img = screen_image()
+    key = (tuple(box), psm)
+    if key in _ocr_cache:
+        return _ocr_cache[key]
     crop = img.crop(box)
-    crop_path = "/tmp/mg_crop.png"
-    crop.save(crop_path)
-    result = sh(f"tesseract {crop_path} - --psm {psm} 2>/dev/null")
-    return result.stdout.strip()
+    _ocr_cache[key] = ocr_image(crop, psm)
+    return _ocr_cache[key]
 
-_TEMP_IMAGE_KEEP = {SCREENSHOT, _RAW_SCREENSHOT, "/tmp/mg_crop.png"}
+_TEMP_IMAGE_KEEP = {SCREENSHOT, _RAW_SCREENSHOT, _CROP}
 
 def cleanup_temp_images():
-    """Removes any stray /tmp/mg_*/mga_* files that aren't the fixed,
-    reused paths this script itself writes to (SCREENSHOT,
-    _RAW_SCREENSHOT, the OCR crop path). Added 2026-09-11 per explicit
-    user request to keep /tmp from accumulating clutter over long
-    unattended runs, run at a natural checkpoint (rolls empty, entering
-    the 2h backoff) rather than every tick.
+    # Only our own temporary files may be removed; never other sessions' captures.
+    for path in (_RAW_SCREENSHOT, _CROP):
+        try:
+            os.remove(path)
+        except FileNotFoundError:
+            pass
 
-    The production script itself was never actually the source of any
-    real buildup - confirmed live it only ever writes to those 3 fixed,
-    overwritten-in-place paths. A 213MB/169-file pile found in /tmp
-    turned out to be entirely leftover from manual ad-hoc diagnostic
-    screenshots (and copies of this script) made during debugging
-    sessions, not from the script's own operation. This is a defensive
-    safety net for exactly that kind of leftover clutter, in case a
-    future debugging session (or anything else touching this box) leaves
-    similar files behind.
 
-    Skips anything modified in the last 5 minutes - avoids racing a
-    concurrent live debugging session that might have just created a
-    diagnostic file of its own."""
-    import glob, os, time
-    now = time.time()
-    removed = 0
-    for pattern in ("/tmp/mg_*", "/tmp/mga_*"):
-        for path in glob.glob(pattern):
-            if path in _TEMP_IMAGE_KEEP:
-                continue
-            try:
-                if now - os.path.getmtime(path) < 300:
-                    continue
-                os.remove(path)
-                removed += 1
-            except OSError:
-                pass
-    if removed:
-        print(f"Cleaned up {removed} stray temp file(s) from /tmp.")
+_diagnostic_times = {}
+
+
+def record_diagnostic(reason):
+    """Keep at most twelve game screenshots, rate-limited by failure type."""
+    if os.environ.get('MONOPOLY_DIAGNOSTICS') != '1':
+        return
+    now = time.monotonic()
+    if now - _diagnostic_times.get(reason, float('-inf')) < 60:
+        return
+    _diagnostic_times[reason] = now
+    try:
+        from pathlib import Path
+        folder = Path.home() / '.local/state/monopoly-assist/diagnostics'
+        folder.mkdir(parents=True, exist_ok=True)
+        safe_reason = re.sub(r'[^a-z0-9_-]', '_', reason.lower())
+        target = folder / f'{time.time_ns()}-{safe_reason}.png'
+        shutil.copyfile(SCREENSHOT, target)
+        for old in sorted(folder.glob('*.png'))[:-12]:
+            old.unlink()
+        print(f'DIAGNOSTIC {reason}: {target}')
+    except OSError as exc:
+        print(f'Diagnostic capture unavailable: {exc}')
+
 
 def _is_pill_blue(rgb):
     r, g, b = rgb
     return b > 200 and g > 140 and r < 220 and b > r
+
+_last_die_detected = False
 
 def get_roll_fill_ratio():
     """Color-based proxy for the roll count: fraction of the pill's width
     that's still blue (filled) vs dark-olive (empty). Not an exact count,
     but reliable enough to classify low/medium/high - see calibration notes
     above and in RULES.md."""
+    global _last_die_detected
+    _last_die_detected = False
     from PIL import Image
-    img = Image.open(SCREENSHOT).convert("RGB")
+    img = screen_image()
     total = ROLL_PILL_X_END - ROLL_PILL_X_START
     blue = sum(
         1 for x in range(ROLL_PILL_X_START, ROLL_PILL_X_END)
         if _is_pill_blue(img.getpixel((x, ROLL_PILL_Y)))
     )
-    return blue / total if total else 0.0
+    ratio = blue / total if total else 0.0
+    # A tiny remaining fill (live 3/60) is below the historical 3% cutoff.
+    # Require a contiguous blue patch across three rows, not a stray pixel.
+    if 0 < ratio < ROLL_RATIO_EMPTY:
+        for x in range(ROLL_PILL_X_START, min(ROLL_PILL_X_START + 35, ROLL_PILL_X_END - 2)):
+            if all(_is_pill_blue(img.getpixel((x + dx, ROLL_PILL_Y + dy)))
+                   for dx in range(3) for dy in (-2, 0, 2)):
+                return ROLL_RATIO_EMPTY
+    if ratio < ROLL_RATIO_EMPTY:
+        # Live 1/60 occupies only the rounded left edge, below the old scanline.
+        for x in range(ROLL_PILL_X_START - 6, ROLL_PILL_X_START + 6):
+            for y in range(ROLL_PILL_Y + 4, ROLL_PILL_Y + 24):
+                if all(_is_pill_blue(img.getpixel((x + dx, y + dy)))
+                       for dx in range(3) for dy in range(5)):
+                    _last_die_detected = (ratio == 0)
+                    return ROLL_RATIO_EMPTY
+    return ratio
 
 def _is_bonus_roll_purple(rgb):
     """A real purple has a distinct 'green valley' - g meaningfully lower
@@ -342,7 +502,7 @@ def is_bonus_roll_screen():
     should still cover a small spread of nearby points; a small confetti
     piece is unlikely to cover all of them at once."""
     from PIL import Image
-    img = Image.open(SCREENSHOT).convert("RGB")
+    img = screen_image()
     cx, cy = BONUS_ROLL_BUTTON
     offsets = [(0, 0), (-15, 0), (15, 0), (0, -15), (0, 15)]
     hits = sum(
@@ -358,7 +518,7 @@ def is_raid_screen():
     """Cheap gate check for the raid/heist target-selection screen: is the
     olive 'SWITCH OPPONENT' button showing at its calibrated point?"""
     from PIL import Image
-    img = Image.open(SCREENSHOT).convert("RGB")
+    img = screen_image()
     return _color_close(img.getpixel(RAID_SWITCH_BUTTON), RAID_SWITCH_BUTTON_COLOR)
 
 def _is_reticle_white(rgb):
@@ -379,7 +539,7 @@ def find_raid_targets():
     from PIL import Image
     from collections import deque
 
-    img = Image.open(SCREENSHOT).convert("RGB")
+    img = screen_image()
     w, h = img.size
     px = img.load()
     step = 3
@@ -400,10 +560,12 @@ def find_raid_targets():
         q = deque([start])
         while q:
             cx, cy = q.popleft()
-            near = [
-                p for p in remaining
-                if abs(p[0] - cx) <= neighbor_dist and abs(p[1] - cy) <= neighbor_dist
-            ]
+            # Points lie on a step-spaced grid. Test the same neighborhood
+            # directly instead of scanning every remaining point per pixel.
+            near = [(cx + dx, cy + dy)
+                    for dx in range(-neighbor_dist, neighbor_dist + 1, step)
+                    for dy in range(-neighbor_dist, neighbor_dist + 1, step)
+                    if (cx + dx, cy + dy) in remaining]
             for p in near:
                 remaining.discard(p)
                 comp.append(p)
@@ -436,13 +598,17 @@ def _drain_collect_popups(max_extra=6):
     confirmed live 2026-09-07 that different popup designs place it at
     meaningfully different coordinates, so a chained popup's button isn't
     guaranteed to be in the same place as the one that triggered this."""
-    btn = find_green_button()
+    if is_purchase_upsell_screen():
+        return
+    btn = find_collect_button()
     if btn:
         tap(*btn)
     for _ in range(max_extra):
         time.sleep(1.3)
         screenshot()
-        btn = find_green_button()
+        if is_purchase_upsell_screen():
+            break
+        btn = find_collect_button()
         if not btn:
             break
         print(f"Another chained popup detected - tapping green button at {btn}.")
@@ -485,6 +651,7 @@ def cmd_raid():
             _drain_collect_popups()
             return 0
     print("No COLLECT popup appeared after raid tap (timed out waiting).")
+    record_diagnostic('raid_reward_timeout')
     return 0
 
 def _is_badge_red(rgb):
@@ -497,7 +664,7 @@ def is_build_badge_present():
     purchase is affordable/pending) - tolerates 1 or 2-digit badge counts
     shifting the circle's exact position."""
     from PIL import Image
-    img = Image.open(SCREENSHOT).convert("RGB")
+    img = screen_image()
     return any(
         _is_badge_red(img.getpixel((x, BUILD_BADGE_Y)))
         for x in range(*BUILD_BADGE_X_RANGE)
@@ -507,7 +674,7 @@ def is_shop_badge_present():
     """Checks the shop icon's red notification-dot badge (see constant
     definition)."""
     from PIL import Image
-    img = Image.open(SCREENSHOT).convert("RGB")
+    img = screen_image()
     return _is_badge_red(img.getpixel(SHOP_BADGE_CHECK_POINT))
 
 def cmd_check_shop():
@@ -542,28 +709,355 @@ def cmd_check_shop():
     tap(*GENERIC_BOTTOM_CLOSE_X)
     time.sleep(1.0)
 
-def cmd_check_wins():
-    """Opens the WINS / 'Today's Quick Wins' screen and repeatedly finds
-    and taps the next green button (TAP TO CLAIM!, then any chained
-    COLLECT/MILESTONE REACHED popups) until none remain. Confirmed live
-    2026-09-07: this single screen paid out +100,000 cash, +35 rolls, and
-    a further +400,000 weekly-milestone bonus, all genuinely free (no
-    purchase buttons anywhere on this screen, unlike the shop - no OCR
-    safety-gate needed here)."""
-    print("Checking WINS for claimable rewards.")
-    tap(*WINS_ICON)
-    time.sleep(1.5)
-    for _ in range(8):
-        screenshot()
-        btn = find_green_button(y_start=700, y_end=2340)
-        if not btn:
-            break
-        print(f"Claiming reward button at {btn}.")
-        tap(*btn)
-        time.sleep(1.3)
+SIDE_FREE_CHECK_COOLDOWN_S = 300
+SIDE_FREE_ICON_COOLDOWN_S = 900
+_last_side_free_check = float('-inf')
+_side_free_visits = {}
+
+
+def _exact_free_boxes(tsv):
+    """Observed, high-confidence standalone FREE labels; never substring matches."""
+    lines = {}
+    for row in tsv.splitlines():
+        cols = row.split('\t')
+        if len(cols) < 12 or cols[0] != '5' or not cols[11].strip():
+            continue
+        lines.setdefault(tuple(cols[1:5]), []).append(cols)
+    result = []
+    for words in lines.values():
+        if len(words) != 1:
+            continue
+        cols = words[0]
+        if not re.fullmatch(r'FREE!?', cols[11].strip().upper()):
+            continue
+        try:
+            x, y, width, height = map(int, cols[6:10])
+            confidence = float(cols[10])
+        except ValueError:
+            continue
+        if 80 <= confidence <= 100 and x >= 0 and y >= 0 and width > 0 and height > 0:
+            result.append((x, y, width, height))
+    return result
+
+
+def _free_offer_context(text):
+    """Fail closed on priced, conditional, locked or unfamiliar offer screens."""
+    upper = text.upper()
+    if re.search(r'[$\u00a3\u20ac\u00a5]|\b\d+[.,]\d{2}\b|\b(?:BUY|PURCHASE|LOCKED|UNLOCK\w*|AFTER|REQUIRES?|SUBSCRIBE|WATCH|EXPIRED|NOT|USD|GBP|EUR)\b', upper):
+        return False
+    return bool(re.search(r'\b(?:DAILY GIFT|FREE GIFT|FREE REWARD)\b', upper))
+
+
+def _side_free_icon_candidates():
+    """Check both side strips; open only an icon visibly labeled FREE."""
+    image = screen_image()
+    if image.size != (1080, 2340) or is_card_popup_screen():
+        return []
+    if not _main_board_footer_matches(ocr_region((0, 2110, 1080, 2300), psm=6)):
+        return []
+    result = []
+    # Search regions only; tap coordinates always come from this frame's OCR.
+    for left, top, right, bottom in ((0, 420, 230, 1700), (850, 420, 1080, 1700)):
+        tsv = ocr_image(image.crop((left, top, right, bottom)), psm=11, tsv=True)
+        for x, y, width, height in _exact_free_boxes(tsv):
+            if x + width <= right-left and y + height <= bottom-top and 15 <= height <= 100:
+                result.append((left+x+width//2, top+y+height//2))
+    return sorted(result, key=lambda p: (p[1], p[0]))
+
+
+def _confirmed_free_offer_button():
+    # Keep purchase dismissal separate; never tap a detected purchase body.
+    if is_purchase_upsell_screen():
+        return None
+    image = screen_image()
+    if image.size != (1080, 2340):
+        return None
+    tsv = ocr_image(image, psm=11, tsv=True)
+    text = ' '.join(row.split('\t')[11] for row in tsv.splitlines() if len(row.split('\t')) >= 12)
+    if not _free_offer_context(text):
+        return None
+    candidates = _exact_free_boxes(tsv)
+    if len(candidates) != 1:
+        return None
+    x, y, width, height = candidates[0]
+    if not (30 <= width <= 300 and 15 <= height <= 100 and x+width <= 1080 and y+height <= 2340):
+        return None
+    if not (250 <= x+width//2 <= 830 and 700 <= y+height//2 <= 2130):
+        return None
+    point = find_green_button(y_start=max(700,y-60), y_end=min(2200,y+height+80))
+    if not point or abs(point[0]-(x+width//2)) > 100 or not y-60 <= point[1] <= y+height+80:
+        return None
+    local = ocr_region((max(0,point[0]-220), max(0,y-20), min(1080,point[0]+220), min(2340,y+height+20)))
+    return point if re.fullmatch(r'FREE!?', local.strip().upper()) else None
+
+
+def maybe_check_side_free_items():
+    global _last_side_free_check
+    now = time.monotonic()
+    if now-_last_side_free_check < SIDE_FREE_CHECK_COOLDOWN_S:
+        return False
+    _last_side_free_check = now
     screenshot()
-    tap(*GENERIC_BOTTOM_CLOSE_X)
-    time.sleep(1.0)
+    candidates = _side_free_icon_candidates()
+    for point in candidates:
+        key = (point[0] < 540, point[1]//100)
+        if now-_side_free_visits.get(key, float('-inf')) < SIDE_FREE_ICON_COOLDOWN_S:
+            continue
+        _side_free_visits[key] = now
+        report_phase('checking_side_free_item')
+        if not tap(*point):
+            return False
+        time.sleep(1.5)
+        # At most three free stages, fresh capture and full safety gate each time.
+        for _ in range(3):
+            screenshot()
+            button = _confirmed_free_offer_button()
+            if button is None:
+                break
+            print('Verified standalone FREE gift button; claiming one free item.')
+            if not tap(*button):
+                break
+            time.sleep(1.5)
+        screenshot()
+        if is_collect_screen() and not is_purchase_upsell_screen():
+            _drain_collect_popups()
+        screenshot()
+        if not _main_board_footer_matches(ocr_region((0,2110,1080,2300),psm=6)):
+            game_back() # One guarded navigation action; no blind popup-body taps.
+            time.sleep(1.0)
+        return True
+    return False
+
+
+_last_wins_check = float('-inf')
+WINS_CHECK_COOLDOWN_S = 300
+
+
+def is_wins_badge_present():
+    image = screen_image()
+    # Bottom-left red notification circle, away from side offer badges.
+    hits = sum(1 for y in range(1978,2017,4) for x in range(124,159,4)
+               if (lambda c: c[0] > 190 and c[1] < 100 and c[2] < 110)(image.getpixel((x,y))))
+    return hits >= 20
+
+
+def is_wins_screen():
+    text = ocr_region((100,300,1000,800), psm=11).upper()
+    if ('QUICK' in text and 'WINS' in text) or 'MILESTONE REACHED' in text or 'QUICK WIN COMPLETE' in text:
+        return True
+    footer = ocr_region((80,1570,1000,2100), psm=11).upper()
+    return 'WEEKLY PRIZE' in footer and 'FILL THE BAR' in footer
+
+
+def maybe_check_wins():
+    global _last_wins_check
+    if is_wins_screen():
+        cmd_check_wins()
+        return True
+    if time.monotonic() - _last_wins_check < WINS_CHECK_COOLDOWN_S:
+        return False
+    if not is_wins_badge_present() or _multiplier_probe_blocked():
+        return False
+    _last_wins_check = time.monotonic()
+    cmd_check_wins()
+    return True
+
+
+def cmd_check_wins():
+    """Claim only recognized reward labels within verified Quick Wins."""
+    global _last_wins_check
+    _last_wins_check = time.monotonic()
+    report_phase('claiming_quick_wins')
+    screenshot()
+    if not is_wins_screen():
+        if _multiplier_probe_blocked():
+            return 1
+        if not tap(*WINS_ICON):
+            return 1
+        time.sleep(3.0)
+    for _ in range(12):
+        screenshot()
+        for settle in range(3):
+            if is_wins_screen():
+                break
+            time.sleep(1.0)
+            screenshot()
+        if not is_wins_screen():
+            break
+        btn = find_green_button(y_start=700, y_end=2340)
+        if not btn or not _confirmed_reward_button(btn):
+            break
+        print(f'Claiming verified Quick Wins reward at {btn}.')
+        if not tap(*btn):
+            return 1
+        time.sleep(3.0)
+    screenshot()
+    if is_wins_screen():
+        game_back()
+        time.sleep(1.0)
+        screenshot()
+        if is_wins_screen():
+            tap(540,2245)
+            time.sleep(1.0)
+    return 0
+
+
+_dig_attempts = {}
+_dig_level = None
+
+
+def treasure_level():
+    # Event-specific level header plus the blue display case; no board guessing.
+    image = screen_image()
+    r,g,b = image.getpixel((540,800))
+    if not (b > r + 30 and b > g + 15):
+        return None
+    match = re.search(r'LEVEL\s+(\d+)\s*/\s*18',
+                      ocr_region((350,170,740,245),psm=7).upper())
+    return int(match.group(1)) if match and 1 <= int(match.group(1)) <= 18 else None
+
+
+def treasure_tiles(image):
+    # Connected blue star glyphs, not every blue pixel or fixed grid coordinates.
+    points=set()
+    for y in range(1150,1900,3):
+        for x in range(160,925,3):
+            r,g,b=image.getpixel((x,y))[:3]
+            if (55 <= r <= 90 and 120 <= g <= 158 and 205 <= b <= 245) or (r > 210 and g > 165 and b < 130):
+                points.add((x,y))
+    result=[]
+    while points:
+        start=points.pop(); todo=[start]; group=[start]
+        while todo:
+            x,y=todo.pop()
+            for dx,dy in ((3,0),(-3,0),(0,3),(0,-3)):
+                neighbor=(x+dx,y+dy)
+                if neighbor in points and (image.getpixel(neighbor)[0] > 210) == (image.getpixel(start)[0] > 210):
+                    points.remove(neighbor);todo.append(neighbor);group.append(neighbor)
+        xs=[p[0] for p in group];ys=[p[1] for p in group]
+        w=max(xs)-min(xs);h=max(ys)-min(ys)
+        center=((min(xs)+max(xs))//2,(min(ys)+max(ys))//2)
+        yellow=sum(image.getpixel(p)[0] > 210 for p in group) > len(group)*0.8
+        if yellow:
+            # Gold star is a reinforced tile, not an unplayable board decoration.
+            corners=[image.getpixel((center[0]+dx,center[1]+dy)) for dx,dy in ((-45,-45),(45,-45),(-45,45),(45,45))]
+            blue=sum(c[2] > 180 and c[2] > c[0]+65 and c[2] > c[1]+40 for c in corners)
+            if 35 <= w <= 100 and 35 <= h <= 100 and blue >= 2:
+                result.append(center)
+        elif 20 <= w <= 65 and 20 <= h <= 65 and len(group)>=35:
+            result.append(center)
+    return sorted(result,key=lambda p:(abs(p[0]-540)+abs(p[1]-1500),p))
+
+
+class TreasureWatchdog:
+    def __init__(self):
+        self.reset()
+
+    def reset(self):
+        self.started = None
+        self.progress_at = None
+        self.signature = None
+
+    def update(self, signature):
+        now = time.monotonic()
+        if self.started is None:
+            self.started = self.progress_at = now
+        if signature != self.signature:
+            self.signature = signature
+            self.progress_at = now
+        return now - self.progress_at >= 45
+
+
+_treasure_watchdog = TreasureWatchdog()
+_treasure_exit_retry = 0.0
+
+
+def leave_treasure(reason):
+    global _treasure_exit_retry
+    report_phase('leaving_treasure')
+    if time.monotonic() < _treasure_exit_retry:
+        time.sleep(5)
+        return True
+    print(f'Leaving treasure event: {reason}.')
+    # Prefer the observed event close X over Back, which this event may ignore.
+    for _ in range(2):
+        screenshot()
+        if treasure_level() is None:
+            _treasure_watchdog.reset()
+            print('Treasure event closed; returning to normal screen handling.')
+            return True
+        tap(540,2245)
+        time.sleep(1.5)
+    screenshot()
+    if treasure_level() is None:
+        _treasure_watchdog.reset()
+        print('Treasure event closed; returning to normal screen handling.')
+    else:
+        game_back()
+        _treasure_exit_retry = time.monotonic() + 30
+        print('Close not yet confirmed; next verified exit attempt in 30 seconds.')
+    return True
+
+
+def handle_treasure():
+    global _dig_level, _dig_attempts
+    level=treasure_level()
+    if level is None:
+        return False
+    report_phase('treasure_dig')
+    if level != _dig_level:
+        _dig_level=level;_dig_attempts={}
+    title=ocr_region((120,450,980,680),psm=11).upper()
+    if 'TREASURES FOUND' in title:
+        if _treasure_watchdog.update((level,'reward')):
+            return leave_treasure('reward screen made no progress')
+        button=find_green_button()
+        if button and _confirmed_reward_button(button):
+            tap(*button)
+        time.sleep(3)
+        return True
+    count=ocr_region((525,2070,660,2165),psm=7).strip()
+    if not re.fullmatch(r'\d{1,3}',count):
+        if _treasure_watchdog.update((level,'unreadable')):
+            return leave_treasure('hammer count unreadable for 45 seconds')
+        print('Treasure hammer count unreadable; waiting without tile taps.')
+        time.sleep(3)
+        return True
+    if int(count)==0:
+        return leave_treasure('no hammers remaining')
+    if _treasure_watchdog.update((level,int(count))):
+        return leave_treasure('no progress for 45 seconds')
+    for point in treasure_tiles(screen_image()):
+        center_color=screen_image().getpixel(point)
+        key=(round(point[0]/10),round(point[1]/10),center_color[0]>210)
+        if _dig_attempts.get(key,0)>=2:
+            continue
+        _dig_attempts[key]=_dig_attempts.get(key,0)+1
+        print(f'Treasure level {level}: uncovering verified tile {point}; hammers={count}.')
+        tap(*point);time.sleep(2)
+        return True
+    print('Treasure animation or unrecognized grid; waiting without blind taps.')
+    time.sleep(3)
+    return True
+
+
+def _build_footer_matches(text):
+    """Named city plus its 0..30 landmark progress, in the bottom footer only."""
+    return bool(re.search(r"[A-Za-z][A-Za-z '\u2019.-]{2,}\s+(?:[0-9]|[12][0-9]|30)\s*/\s*30\b", text))
+
+
+def _main_board_footer_matches(text):
+    """Identify board navigation even when sparkle-heavy OCR misses the dice."""
+    upper = text.upper()
+    labels = sum(bool(re.search(r'\b' + label + r'\b', upper))
+                 for label in ('WINS', 'ALBUM', 'FRIENDS'))
+    if labels >= 2 and re.search(r'\b\d+\s*/\s*\d+\b', text):
+        return True
+    # BUILD menus replace this navigation footer with city/landmark progress.
+    # All four board labels provide independent evidence when the stylized
+    # dice fraction is omitted; fewer labels still require the fraction.
+    return labels == 3 and bool(re.search(r'\bBUILD\b', upper))
+
 
 def is_build_menu_open():
     """Detects whether the BUILD menu is currently open (see constant
@@ -623,9 +1117,20 @@ def is_build_menu_open():
     back up (which would break the mostly-maxed-slots case this fallback
     exists for)."""
     from PIL import Image
-    img = Image.open(SCREENSHOT).convert("RGB")
+    img = screen_image()
+    footer = ocr_region((0, 2110, 1080, 2300), psm=6)
+    if _main_board_footer_matches(footer):
+        return False
+    # Sparkle frames can also confuse block segmentation enough to omit a
+    # navigation label. Read its text-only row before considering green icons.
+    navigation = ocr_region((0, 2200, 1080, 2260), psm=7)
+    if _main_board_footer_matches(navigation):
+        return False
     r, g, b = img.getpixel(BUILD_MENU_CHECK_POINT)
     if 70 < r < 130 and 65 < g < 120 and 40 < b < 100 and (r - b) > 15 and (g - b) > 10:
+        return True
+    # Theme-independent footer stays readable when stylized prices do not.
+    if _build_footer_matches(footer):
         return True
     text = ocr_region(BUILD_PRICE_ROW_BOX, psm=6)
     price_matches = re.findall(r"\d[\d,.]*\s*[KM]\b", text)
@@ -652,7 +1157,7 @@ def is_match3_screen():
     time this runs, and of the two 'reward' slots at top-left of the grid
     which aren't tappable tiles and read as other colors."""
     from PIL import Image
-    img = Image.open(SCREENSHOT).convert("RGB")
+    img = screen_image()
     gold_count = sum(
         1 for y in MATCH3_TILE_YS for x in MATCH3_TILE_XS
         if _is_match3_gold(img.getpixel((x, y)))
@@ -666,7 +1171,7 @@ def is_card_popup_screen():
     of cards' per the user, as long as they share this same dimmed-modal
     presentation."""
     from PIL import Image
-    img = Image.open(SCREENSHOT).convert("RGB")
+    img = screen_image()
     return all(c < 100 for c in img.getpixel(CARD_DIM_CHECK_POINT))
 
 def _is_dismiss_green(rgb):
@@ -725,7 +1230,7 @@ def find_green_button(min_width=250, max_height=200, min_size=80, y_start=2100, 
     boundary that matches the documented real range exactly."""
     from PIL import Image
     from collections import deque
-    img = Image.open(SCREENSHOT).convert("RGB")
+    img = screen_image()
     step = 4
     pts = set()
     for y in range(y_start, y_end, step):
@@ -741,10 +1246,10 @@ def find_green_button(min_width=250, max_height=200, min_size=80, y_start=2100, 
         q = deque([start])
         while q:
             cx, cy = q.popleft()
-            near = [
-                p for p in remaining
-                if abs(p[0] - cx) <= neighbor_dist and abs(p[1] - cy) <= neighbor_dist
-            ]
+            near = [(cx + dx, cy + dy)
+                    for dx in range(-neighbor_dist, neighbor_dist + 1, step)
+                    for dy in range(-neighbor_dist, neighbor_dist + 1, step)
+                    if (cx + dx, cy + dy) in remaining]
             for p in near:
                 remaining.discard(p)
                 comp.append(p)
@@ -775,6 +1280,90 @@ def find_green_button(min_width=250, max_height=200, min_size=80, y_start=2100, 
         return None
     return ((x0 + x1) // 2, y0 + 8)
 
+def _find_collect_word_from_tsv(tsv, min_y=700):
+    """Return the center of an exact COLLECT OCR word from Tesseract TSV.
+
+    Kept pure so the safety rule can be tested without a device or OCR:
+    only the literal word COLLECT is accepted, confidence must be usable,
+    and the match must be below the fixed top HUD. This is a fallback for
+    reward screens whose button is not green or sits outside the historic
+    y=2100..2340 color-search band.
+    """
+    matches = []
+    rows = [line.split('\t') for line in tsv.splitlines()]
+    text_lines = {}
+    for cols in rows:
+        if len(cols) >= 12 and cols[11].strip():
+            text_lines.setdefault(tuple(cols[:5]), []).append(cols[11].strip())
+    for line in tsv.splitlines():
+        cols = line.split("\t")
+        if len(cols) < 12:
+            continue
+        try:
+            left, top, width, height = map(int, cols[6:10])
+            confidence = float(cols[10])
+        except (TypeError, ValueError):
+            continue
+        word = re.sub(r"[^A-Z]", "", cols[11].upper())
+        line_words = text_lines.get(tuple(cols[:5]), [])
+        if len(line_words) != 1 or word != "COLLECT" or confidence < 30 or top < min_y:
+            continue
+        matches.append((confidence, width * height,
+                        left + width // 2, top + height // 2))
+    if not matches:
+        return None
+    matches.sort(reverse=True)
+    return (matches[0][2], matches[0][3])
+
+def _is_go_area_button(point, max_dx=120, max_dy=250):
+    """Return True when a detected button overlaps the established GO area."""
+    if not point:
+        return False
+    return (abs(point[0] - GO_BUTTON[0]) <= max_dx and
+            abs(point[1] - GO_BUTTON[1]) <= max_dy)
+
+def _safe_reward_label(text):
+    # Color alone also matches real-money purchase buttons and locked FREE offers.
+    words = re.sub(r'[^A-Z0-9$??]+', ' ', text.upper()).strip()
+    return words in {'COLLECT', 'GO', 'TAP TO CLAIM', 'CLAIM'}
+
+
+def _confirmed_reward_button(point):
+    x, y = point
+    width, height = screen_image().size
+    text = ocr_region((max(0,x-230), max(0,y-65), min(width,x+230), min(height,y+65)))
+    if _safe_reward_label(text):
+        return point
+    # Shape detector points near the top rim. Exclude that rim from OCR.
+    text = ocr_region((max(0,x-220), max(0,y+10), min(width,x+220), min(height,y+81)))
+    return point if _safe_reward_label(text) else None
+
+
+def find_collect_button(require_hidden_roll_pill=True):
+    """Find a COLLECT button by the established green shape first, then
+    by exact OCR text when the roll pill is hidden.
+
+    The hidden-pill condition prevents a full-screen OCR pass during
+    ordinary rolling and prevents unrelated screen text from becoming a
+    top-level tap target. cmd_collect() may disable that condition because
+    it is an explicit one-off user action.
+    """
+    btn = find_green_button()
+    if btn:
+        return _confirmed_reward_button(btn)
+    # Expired-event leaderboards can place COLLECT around y=1894, directly
+    # over GO rather than in the historic y>=2100 reward band.  A global
+    # search here previously matched flat lawn, so require both a dimmed
+    # modal and overlap with the calibrated GO area.
+    if is_card_popup_screen():
+        btn = find_green_button(y_start=GO_BUTTON[1] - 175,
+                                y_end=GO_BUTTON[1] + 225)
+        if _is_go_area_button(btn):
+            return _confirmed_reward_button(btn)
+    if require_hidden_roll_pill and get_roll_fill_ratio() >= ROLL_RATIO_EMPTY:
+        return None
+    return _find_collect_word_from_tsv(ocr_image(screen_image(), psm=11, tsv=True))
+
 def is_board_complete_screen():
     """Detects the 'BOARD COMPLETE!' celebration screen - now just an
     alias for the general green-button finder (see find_green_button);
@@ -792,7 +1381,7 @@ def is_switch_opponent_menu():
     cheap in practice since it only runs on the rare ticks where the color
     pre-filter already matched."""
     from PIL import Image
-    img = Image.open(SCREENSHOT).convert("RGB")
+    img = screen_image()
     r, g, b = img.getpixel(SWITCH_OPPONENT_MENU_CHECK_POINT)
     color_match = 195 < r < 235 and 175 < g < 215 and 95 < b < 140
     if not color_match:
@@ -804,9 +1393,48 @@ def is_color_wheel_screen():
     """Detects the Color Wheel bonus prize-spinner screen (see constant
     definition)."""
     from PIL import Image
-    img = Image.open(SCREENSHOT).convert("RGB")
+    img = screen_image()
     r, g, b = img.getpixel(COLOR_WHEEL_CHECK_POINT)
-    return 80 < r < 160 and 130 < g < 200 and 60 < b < 140 and g > r and g > b
+    if not (80 < r < 160 and 130 < g < 200 and 60 < b < 140 and g > r and g > b):
+        return False
+    # A confirmed board footer cannot belong to the full-screen wheel overlay.
+    # Avoid expensive outlined-title OCR during every multiplier probe step.
+    navigation = ocr_region((0, 2200, 1080, 2260), psm=7)
+    if _main_board_footer_matches(navigation):
+        return False
+    # Net Worth Gallery milestone badges can share this banner color.
+    # Confirm the event title before ever treating a tap as a free spin.
+    title = ocr_region((180, 300, 900, 690), psm=6)
+    title_matches = bool(re.search(r'\bCOLOR\s+WHEEL\b', title.upper()))
+    if not title_matches:
+        # The current large, outlined heading defeats block segmentation.
+        # Read both complete words separately; never repair guessed letters.
+        color_key = ('color_wheel_title_mask',)
+        if color_key not in _ocr_cache:
+            crop = img.crop((250, 330, 850, 465)).convert('RGB')
+            mask = Image.new('L', crop.size, 255)
+            mask.putdata([0 if red > 220 and green > 190 else 255
+                          for red, green, blue in crop.getdata()])
+            _ocr_cache[color_key] = ocr_image(
+                mask.resize((mask.width * 2, mask.height * 2)), psm=7)
+        color = _ocr_cache[color_key]
+        wheel_key = ('color_wheel_lower_title_mask',)
+        if wheel_key not in _ocr_cache:
+            crop = img.crop((240, 465, 850, 640)).convert('RGB')
+            mask = Image.new('L', crop.size, 255)
+            mask.putdata([0 if red > 220 and green > 190 else 255
+                          for red, green, blue in crop.getdata()])
+            _ocr_cache[wheel_key] = ocr_image(
+                mask.resize((mask.width * 2, mask.height * 2)), psm=7)
+        wheel = _ocr_cache[wheel_key]
+        title_matches = (bool(re.search(r'\bCOLOR\b', color.upper())) and
+                         bool(re.search(r'\bWHEEL\b', wheel.upper())))
+    if not title_matches:
+        return False
+    spin = ocr_region((300, 1820, 800, 1930), psm=7).upper()
+    spin = spin.strip(" \t\r\n/\\(),[]'\"")
+    remaining = ocr_region((250, 2140, 850, 2270), psm=7).upper().strip()
+    return spin == 'SPIN' and bool(re.fullmatch(r'[1-9]\d*\s+SPINS?\s+LEFT', remaining))
 
 def is_quit_dialog_present():
     """Detects the 'Would you like to quit the game?' confirmation dialog
@@ -826,9 +1454,15 @@ def is_quit_dialog_present():
     if not is_card_popup_screen():
         return False
     from PIL import Image
-    img = Image.open(SCREENSHOT).convert("RGB")
+    img = screen_image()
     r, g, b = img.getpixel(QUIT_DIALOG_CHECK_POINT)
-    return 200 < r < 255 and 150 < g < 210 and b < 110
+    if not (200 < r < 255 and 150 < g < 210 and b < 110):
+        return False
+    # Color Wheel's yellow rim matches this pixel on a dimmed board too.
+    # Confirm the quit dialog text before CANCEL can preempt mini-games.
+    text = ocr_region((100, 650, 980, 1750), psm=11).upper()
+    return bool(re.search(r"\bQUIT\b", text) and
+                (re.search(r"\bGAME\b", text) or re.search(r"\bCANCEL\b", text)))
 
 def _is_orange_x_color(rgb):
     r, g, b = rgb
@@ -848,9 +1482,9 @@ def find_orange_x_button(min_cluster=8):
     (which lands on the white X glyph drawn in the middle - also confirmed
     live), or None if no such button is found."""
     from PIL import Image
-    img = Image.open(SCREENSHOT).convert("RGB")
+    img = screen_image()
     pts = [
-        (x, y) for y in range(300, 550, 3) for x in range(800, 1080, 3)
+        (x, y) for y in range(230, 550, 3) for x in range(800, 1080, 3)
         if _is_orange_x_color(img.getpixel((x, y)))
     ]
     if len(pts) < min_cluster:
@@ -859,6 +1493,335 @@ def find_orange_x_button(min_cluster=8):
     top_pts = [p for p in pts if p[1] <= min_y + 8]
     cx = sum(p[0] for p in top_pts) // len(top_pts)
     return (cx, min_y + 8)
+
+# Verified Halloween railroad Chance card. No generic popup-body taps.
+_chance_attempts = 0
+
+def is_railroad_chance_card():
+    if not is_card_popup_screen():
+        return False
+    im = screen_image()
+    if im.size != (1080, 2340):
+        return False
+    if not all(min(im.getpixel(p)[:3]) > 235 for p in
+               [(150,1000),(930,1000),(150,1470),(930,1470)]):
+        return False
+    title = ocr_region((420,1005,660,1050)).strip().upper()
+    if title != 'CHANCE':
+        return False
+    words = re.findall(r'[A-Z]+', ocr_region((180,1110,570,1300), psm=6).upper())
+    return words[:7] == ['HEAD','TO','THE','NEAREST','RAILROAD','IF','YOU'] and 'DARE' in words
+
+def handle_railroad_chance():
+    global _chance_attempts
+    if not is_railroad_chance_card():
+        if not is_card_popup_screen():
+            _chance_attempts = 0
+        return False
+    if _chance_attempts >= 2:
+        report_phase('chance_card_needs_attention')
+        time.sleep(15)
+        return True
+    _chance_attempts += 1
+    report_phase('advancing_railroad_chance')
+    print(f'Verified railroad Chance card: advance attempt {_chance_attempts}/2.')
+    tap(540, 1250)
+    time.sleep(3)
+    return True
+
+# Halloween house-choice event: calibrated from the live 1080x2340 screen.
+_HOUSE_POINTS = ((551,850),(310,936),(795,932),(132,1050),(964,1062))
+_house_attempts = {}
+_house_header = None
+
+def find_house_choices():
+    import math
+    try:
+        img = screen_image()
+    except (OSError,ValueError):
+        return []
+    if img.size != (1080,2340):
+        return []
+    choices = []
+    for x,y in _HOUSE_POINTS:
+        for radius in range(58,78,2):
+            hits = 0
+            for i in range(32):
+                c = img.getpixel((round(x+radius*math.cos(i*math.tau/32)),
+                                  round(y+radius*math.sin(i*math.tau/32))))
+                hits += min(c)>170 and max(c)-min(c)<45
+            if hits >= 26:
+                choices.append((x,y))
+                break
+    return choices
+
+# Boutique block puzzle: calibrated from the 2026-10-04 phone recording.
+# Require fully observed connected drawer shapes, including material-bearing cells.
+_BOUTIQUE_LAST_FRAME = None
+_BOUTIQUE_FAILED = set()
+
+
+def _boutique_gold(rgb):
+    r,g,b = rgb[:3]
+    return r > 210 and 140 < g < 240 and b < 100
+
+
+def _is_boutique_board():
+    image = screen_image()
+    if image.size != (1080,2340):
+        return False
+    # A bright book plus the blue frame excludes tutorial/purchase overlays.
+    r,g,b = image.getpixel((245,280))
+    if not (r > 200 and g > 190 and b > 140):
+        return False
+    for x,y in ((60,700),(1020,700),(60,1600),(1020,1600)):
+        r,g,b = image.getpixel((x,y))
+        if not (b > 140 and b > r+30 and g > 90):
+            return False
+    header = ocr_region((200,205,920,295),psm=6).upper()
+    if 'RECIPE' not in header or not re.search(r'MERCH\s+ITEM',header):
+        return False
+    return True
+
+
+def _boutique_state():
+    if not _is_boutique_board():return None
+    image=screen_image()
+    board=[]; materials=set()
+    for row in range(8):
+        cells=[]
+        for col in range(8):
+            x,y=160+109*col,785+109*row
+            r,g,b=image.getpixel((x,y))
+            if _boutique_gold((r,g,b)):
+                cells.append(1)
+            elif 85 <= r <= 130 and 50 <= g <= 95 and 125 <= b <= 190 and b > r+25:
+                cells.append(0)
+            else:
+                pixels=[image.getpixel((x+dx,y+dy)) for dy in range(-45,46,3) for dx in range(-45,46,3)]
+                teal=sum(50<cr<180 and 100<cg<220 and 90<cb<220 and cg>cr+15 and cb>cr+10 for cr,cg,cb in pixels)/len(pixels)
+                if teal < 0.2:return None
+                cells.append(1);materials.add((row,col))
+        board.append(tuple(cells))
+    count=ocr_region((535,2060,605,2140),psm=7).strip()
+    if not re.fullmatch(r'\d{1,3}',count):
+        return None
+    pieces=[]
+    for slot,(left,right) in enumerate(((180,385),(430,665),(690,915))):
+        def material(rgb):
+            r,g,b=rgb[:3]
+            return 60 < r < 165 and 105 < g < 205 and 100 < b < 205 and g > r+20 and b > r+15
+        points=[(x,y) for y in range(1780,2005,2) for x in range(left,right,2)
+                if _boutique_gold(image.getpixel((x,y))) or material(image.getpixel((x,y)))]
+        if not points:continue
+        x0=min(x for x,y in points);x1=max(x for x,y in points)
+        y0=min(y for x,y in points);y1=max(y for x,y in points)
+        w=round((x1-x0+2)/45);h=round((y1-y0+2)/45)
+        if not (1 <= w <= 5 and 1 <= h <= 5 and abs(x1-x0+2-w*45)<12 and abs(y1-y0+2-h*45)<12):return None
+        shape=[];carried=[]
+        for rr in range(h):
+            for cc in range(w):
+                x=round(x0+(cc+0.5)*(x1-x0+2)/w)
+                y=round(y0+(rr+0.5)*(y1-y0+2)/h)
+                pixels=[image.getpixel((x+dx,y+dy)) for dy in range(-15,16,3) for dx in range(-15,16,3)]
+                gold=sum(_boutique_gold(v) for v in pixels)/len(pixels)
+                teal=sum(material(v) for v in pixels)/len(pixels)
+                if gold > 0.6:shape.append((rr,cc))
+                elif teal > 0.12:
+                    shape.append((rr,cc));carried.append((rr,cc))
+                elif gold+teal > 0.05:return None
+        if not shape:return None
+        # Pieces must be one connected shape; reject debris/unclear drawer geometry.
+        seen={shape[0]};pending=[shape[0]]
+        while pending:
+            r,c=pending.pop()
+            for point in ((r-1,c),(r+1,c),(r,c-1),(r,c+1)):
+                if point in shape and point not in seen:seen.add(point);pending.append(point)
+        if len(seen) != len(shape):return None
+        grab=min(shape,key=lambda rc:(rc[0]-(h-1)/2)**2+(rc[1]-(w-1)/2)**2)
+        source=(round(x0+(grab[1]+0.5)*(x1-x0+2)/w),round(y0+(grab[0]+0.5)*(y1-y0+2)/h))
+        pieces.append((slot,w,h,source,tuple(shape),tuple(carried),grab))
+    return tuple(board),frozenset(materials),int(count),tuple(pieces)
+
+
+def _boutique_placements(board,w,h,shape=None):
+    if shape is None:shape=tuple((r,c) for r in range(h) for c in range(w))
+    return [(r,c) for r in range(9-h) for c in range(9-w)
+            if all(not board[r+rr][c+cc] for rr,cc in shape)]
+
+
+def _boutique_move(board,materials,pieces):
+    best=None
+    for piece in pieces:
+        slot,w,h,source=piece[:4]
+        shape=piece[4] if len(piece)>4 else tuple((r,c) for r in range(h) for c in range(w))
+        carried=piece[5] if len(piece)>5 else ()
+        for row,col in _boutique_placements(board,w,h,shape):
+            filled=[list(r) for r in board]
+            for r,c in shape:filled[row+r][col+c]=1
+            rows={r for r in range(8) if all(filled[r])}
+            cols={c for c in range(8) if all(filled[r][c] for r in range(8))}
+            targets=set(materials)|{(row+r,col+c) for r,c in carried}
+            collected=sum(r in rows or c in cols for r,c in targets)
+            for r in range(8):
+                for c in range(8):
+                    if r in rows or c in cols:filled[r][c]=0
+            mobility=sum(len(_boutique_placements(filled,p[1],p[2],p[4] if len(p)>4 else None)) for p in pieces if p[0] != slot)
+            score=(collected*1000+(len(rows)+len(cols))*100+mobility, -row,-col,-slot)
+            candidate=(score,slot,row,col,w,h,source,tuple(tuple(r) for r in filled))
+            if best is None or score > best[0]:best=candidate
+    return best
+
+
+def _boutique_drag(source,destination):
+    """Only exact game focus; always release touch, including failures."""
+    down=False
+    try:
+        for event,point in (('DOWN',source),('MOVE',destination)):
+            focus=subprocess.run([ADB,'shell','dumpsys','window'],capture_output=True,text=True,timeout=5)
+            if focus.returncode or not _game_has_focus(focus.stdout):return False
+            # Purchase screens are rejected before this routine by the state gate.
+            down=True
+            result=subprocess.run([ADB,'shell','input','motionevent',event,str(point[0]),str(point[1])],capture_output=True,timeout=5)
+            if result.returncode:return False
+        time.sleep(1)
+        return True
+    except (OSError,subprocess.TimeoutExpired):
+        return False
+    finally:
+        if down:
+            # UP releases an existing touch; it must run even if focus changed.
+            try:subprocess.run([ADB,'shell','input','motionevent','UP',str(destination[0]),str(destination[1])],capture_output=True,timeout=5)
+            except (OSError,subprocess.TimeoutExpired):pass
+
+
+def _boutique_transition_label(text):
+    upper=re.sub(r'[^A-Z0-9]+',' ',text.upper()).strip()
+    if re.search(r'\b(?:BUY|PURCHASE|USD|GBP|EUR)\b',upper) or any(c in text for c in '$??'):
+        return None
+    if 'GRAND PRIZE' in upper and 'FILL 1 ROW AND 1 COLUMN' in upper:
+        return 'NEXT'
+    if 'RECIPE COMPLETE' in upper and 'BLOCKS' in upper and 'BOUTIQUE' in upper:
+        return 'COLLECT'
+    return None
+
+
+def _handle_boutique_transition():
+    image=screen_image()
+    if image.size != (1080,2340):return False
+    r,g,b=image.getpixel((500,100))
+    pink=r>170 and b>180 and g<150
+    r,g,b=image.getpixel((540,560))
+    banner=b>170 and r<150 and g>100 and b>g+50
+    if not (pink or banner):return False
+    title=ocr_region((350,200,750,290),psm=6)
+    if 'GRAND PRIZE' in title.upper():
+        text=title+' '+ocr_region((260,405,850,480),psm=6)
+    else:
+        text=ocr_region((100,150,980,750),psm=11)
+    label=_boutique_transition_label(text)
+    if label is None:return False
+    report_phase('boutique_transition')
+    button=find_green_button(y_start=2000,y_end=2280)
+    if button:
+        x,y=button
+        for box in ((x-220,y-65,x+220,y+65),(x-220,y+10,x+220,y+81),(x-240,y-4,x+240,y+106)):
+            if re.fullmatch(r'[\s()\[\]|]*'+label+r'[\s()\[\]|]*',ocr_region(box,psm=6).strip().upper()):
+                tap(*button);time.sleep(3);return True
+    # A recognized transition blocks generic BUILD/popup handlers while animating.
+    time.sleep(2);return True
+
+
+def handle_boutique():
+    global _BOUTIQUE_LAST_FRAME
+    if _handle_boutique_transition():return True
+    if os.environ.get("MONOPOLY_BOUTIQUE_AUTOPLAY") != "1" and _is_boutique_board():
+        report_phase("boutique_deferred_for_review");time.sleep(5);return True
+    state=_boutique_state()
+    if state is None:
+        if _is_boutique_board():
+            report_phase("boutique_waiting_for_review");time.sleep(5);return True
+        return False
+    board,materials,count,pieces=state
+    report_phase('boutique_blocks')
+    if count == 0:
+        print('Boutique event tokens exhausted; leaving without purchasing a refill.')
+        game_back();time.sleep(2);return True
+    signature=(board,pieces,count)
+    if signature == _BOUTIQUE_LAST_FRAME or signature in _BOUTIQUE_FAILED:
+        report_phase('boutique_waiting_for_review');time.sleep(5);return True
+    move=_boutique_move(board,materials,pieces)
+    if move is None:
+        print('Boutique has no verified legal placement; waiting without spending.')
+        _BOUTIQUE_FAILED.add(signature);time.sleep(5);return True
+    _,slot,row,col,w,h,source,expected=move
+    # Ghost placement center is about 400px above the finger in this layout.
+    piece=next(p for p in pieces if p[0] == slot)
+    grab=piece[6] if len(piece)>6 else ((h-1)/2,(w-1)/2)
+    destination=(round(105+109*(col+grab[1]+0.5)),round(730+109*(row+grab[0]+0.5)+400))
+    print(f'Boutique: placing observed {w}x{h} shape {slot} at row={row}, col={col}; tokens={count}.')
+    _BOUTIQUE_LAST_FRAME=signature
+    if not _boutique_drag(source,destination):
+        _BOUTIQUE_FAILED.add(signature);return True
+    time.sleep(3);screenshot()
+    after=_boutique_state()
+    if after is not None:
+        if after[0] != expected or after[2] != count-1:
+            print('Boutique outcome differs from prediction; stopping placements for review.')
+            _BOUTIQUE_FAILED.add((after[0],after[3],after[2]))
+        else:
+            print(f'Boutique placement verified; tokens={after[2]}.')
+    return True
+
+
+def _house_board_title(text):
+    # The board header's vertical separator can be recognized between the
+    # possessive player name and wrapped BOARD. Accept only that observed
+    # decoration and whitespace; never repair guessed letters in the title.
+    return bool(re.search(r"['\u2019]S[\s|]+BOARD\b", text.upper()))
+
+
+def handle_house_choices():
+    global _house_header
+    targets = find_house_choices()
+    if not targets and _house_header is None:
+        return False
+    header = ocr_region((160,195,820,320))
+    # Long player names wrap Board onto another line. Exclude the shield
+    # and timer artwork and read a text block instead of a single line.
+    if not _house_board_title(header):
+        header = ocr_region((190,200,650,315), psm=6)
+    if not _house_board_title(header):
+        if _house_header is not None and not is_card_popup_screen():
+            _house_attempts.clear()
+            _house_header = None
+        return False
+    if not targets:
+        # The shield icon resembles the purchase close color. Never pass a
+        # verified active event's animation to that broad detector.
+        report_phase('waiting_for_house_result')
+        if is_collect_screen():
+            button=find_green_button()
+            if button:
+                tap(*button)
+        time.sleep(2)
+        return True
+    if _house_header is None:
+        if len(targets)<2:
+            return False
+        _house_attempts.clear()
+        _house_header = header
+    report_phase('choosing_halloween_house')
+    target = next((p for p in targets if _house_attempts.get(p,0)<2),None)
+    if target is None:
+        print('House choices unchanged after bounded attempts; pausing rather than tapping indefinitely.')
+        time.sleep(15)
+        return True
+    _house_attempts[target] = _house_attempts.get(target,0)+1
+    print(f'Verified Halloween house choice: {target}, attempt {_house_attempts[target]}/2.')
+    tap(*target) # Existing exact-game foreground guard still applies.
+    time.sleep(3)
+    return True
 
 def is_purchase_upsell_screen():
     """SAFETY-CRITICAL: True if a real-money purchase-upsell popup's
@@ -872,61 +1835,265 @@ def is_purchase_upsell_screen():
 
 PICK_A_BOX_OCR_REGION = (270, 1580, 700, 1660)
 
-def is_pick_a_box_screen():
-    """Detects the 'Infinite Harvest / PICK A BOX' mini-event - confirmed
-    live 2026-09-07 (see RULES.md) that this specific UI does not accept
-    ADB-injected touches at all, after 5 different technique attempts, so
-    it must be treated as manual-only rather than tapped at. Without this
-    detector, the main loop's generic card-popup handler kept firing on
-    it every tick (center-tap, then the close-X fallback), neither of
-    which do anything here - harmless (no purchase buttons on this
-    screen) but a waste of cycles and log noise while waiting for the
-    user to actually pick a box themselves.
-
-    Gated behind is_card_popup_screen() first, same reasoning as
-    find_orange_x_button() above - OCR is comparatively expensive, so
-    only run it on the rare ticks where the cheap dimmed-board color
-    check already matched."""
-    if not is_card_popup_screen():
-        return False
-    text = ocr_region(PICK_A_BOX_OCR_REGION).upper()
+def _pick_a_box_ocr_matches(text):
+    """Pure predicate (no screenshot/OCR I/O) so this can be unit-tested
+    directly - see test_monopoly_go_assist.py."""
+    text = text.upper()
     return "PICK" in text and "BOX" in text
 
+def is_pick_a_box_screen():
+    """Detects the 'Infinite Harvest / PICK A BOX' mini-event.
+
+    UNGATED as of 2026-09-15 - this used to require is_card_popup_screen()
+    (the dimmed-cash-bar overlay check) to pass first, on the assumption
+    this screen was "just another dimmed card popup" like Chance/Community
+    Chest. That assumption was never actually confirmed live against a
+    real screenshot (unlike every other gate in this file, which has a
+    "confirmed live: dimmed point read (R,G,B)" note) - it was copied by
+    analogy from find_orange_x_button()'s gate. Checked against a real
+    live screenshot (mg_live_screen.png) 2026-09-15: this screen does NOT
+    dim the existing UI, it REPLACES the top bar entirely with different
+    background art (no cash figure, no profile picture - just scenery),
+    so CARD_DIM_CHECK_POINT never reads dark here and the gate silently
+    returned False on every real occurrence. Practical effect: the loop
+    could never recognize this screen at all, so it fell through to
+    cmd_roll()'s empty-pill check (this screen occludes the roll pill too)
+    and entered the full ROLL_EMPTY_BACKOFF_S backoff instead - confirmed
+    live 2026-09-15 (user report: loop was sitting in a 7200s backoff on
+    this exact screen). This also means the "5 techniques failed" manual-
+    only conclusion in RULES.md was drawn from taps issued directly at the
+    crates from outside this script (diagnostic-only), never from this
+    detector actually firing and dispatching a real tap - see
+    cmd_pick_a_box() below for the follow-up finding that overturns that
+    conclusion anyway.
+
+    No cheap color pre-filter yet (runs OCR unconditionally, like
+    get_multiplier() already does every tick) - a wrong, unverified color
+    gate is exactly what caused this bug in the first place, so this
+    deliberately favors "confirmed correct but costs one extra OCR call
+    most ticks" over "cheap but silently wrong again". A real pre-filter
+    can be added later IF someone calibrates it against a live screenshot
+    on the deployment host (crop-and-view a real capture, never guess a
+    threshold from a description - see RULES.md's opening warning)."""
+    return _pick_a_box_ocr_matches(ocr_region(PICK_A_BOX_OCR_REGION))
+
+PICK_A_BOX_TAP_RETRIES = 3
+PICK_A_BOX_POLL_S = 1.5
+PICK_A_BOX_POLL_ROUNDS = 7  # ~10.5s of polling per tap attempt
+PICK_A_BOX_FAILURE_BACKOFF_S = 60
+
+def cmd_pick_a_box():
+    """Handles the 'Infinite Harvest / PICK A BOX' mini-event by tapping
+    GO_BUTTON (539,1901).
+
+    SUPERSEDES RULES.md's 2026-09-07 "manual-only" conclusion. New live
+    evidence 2026-09-15: while the loop was stuck in a 7200s empty-roll
+    backoff on this exact screen (see is_pick_a_box_screen() above for why
+    it never even recognized it), a plain `adb shell input tap 539 1901`
+    completed the box-pick - confirmed via a before/after screenshot pair
+    (crates open with revealed contents, then the screen returns to the
+    normal main board). That's the SAME `input tap` primitive already
+    tried and dismissed as non-working back on 2026-09-07. The likely
+    difference: those five earlier attempts tapped coordinates read off
+    the crates' own on-screen position, which apparently weren't precise
+    enough to land inside this Unity element's real hit target - a
+    targeting problem, not a fundamental touch-injection block. GO_BUTTON
+    is used here (rather than re-deriving a fresh per-crate coordinate)
+    because it's this script's most heavily-calibrated, most-tapped point,
+    and the live before/after screenshots confirm one of the (3-4) crates
+    always sits over it, so it reliably lands on a real crate.
+
+    SAFETY: only ever called after is_pick_a_box_screen() has confirmed
+    via OCR that we're genuinely on this screen (both call sites below
+    check that first) - this never taps blind on an unrecognized popup, so
+    it can't be confused with the purchase-upsell path (which has its own
+    separate, OCR/orange-X-gated handling and is never routed through
+    here).
+
+    Does NOT assume one tap = done: the after-tap screenshot still reads
+    as "PICK A BOX" (OCR-wise) for a few seconds while the picked crate's
+    contents animate open, before the screen auto-transitions back to the
+    main board - confirmed live via the before/after screenshot pair. A
+    single immediate re-check can't tell "tap missed" apart from "tap
+    landed, reveal still animating", so this polls for up to
+    PICK_A_BOX_POLL_ROUNDS * PICK_A_BOX_POLL_S seconds for the screen to
+    actually leave this event (or a reward COLLECT popup to appear)
+    before concluding the tap needs to be retried. Bounded to
+    PICK_A_BOX_TAP_RETRIES total tap attempts rather than tapping forever,
+    in case GO_BUTTON's overlap with a real crate ever stops holding
+    (reskin, layout shift, or a genuine touch-injection miss) - falls back
+    to a pause between later attempts if still stuck after that."""
+    for attempt in range(1, PICK_A_BOX_TAP_RETRIES + 1):
+        print(f"Pick a Box screen detected - tapping GO_BUTTON {GO_BUTTON} "
+              f"(attempt {attempt}/{PICK_A_BOX_TAP_RETRIES}).")
+        tap(*GO_BUTTON)
+        for _ in range(PICK_A_BOX_POLL_ROUNDS):
+            time.sleep(PICK_A_BOX_POLL_S)
+            screenshot()
+            if is_collect_screen():
+                print("Pick a Box reward popup detected - tapping it.")
+                _drain_collect_popups()
+                return 0
+            if not is_pick_a_box_screen():
+                print("Pick a Box screen cleared after tap.")
+                return 0
+        print(f"Still on Pick a Box screen after tap + "
+              f"{PICK_A_BOX_POLL_ROUNDS * PICK_A_BOX_POLL_S:.0f}s poll "
+              f"(attempt {attempt}/{PICK_A_BOX_TAP_RETRIES}).")
+    print(f"WARNING: Pick a Box screen still showing after "
+          f"{PICK_A_BOX_TAP_RETRIES} tap attempts at GO_BUTTON - "
+          f"pausing before the next check. If this keeps happening, the "
+          f"GO_BUTTON/crate overlap may have shifted - recalibrate against "
+          f"a fresh live screenshot rather than guessing (see RULES.md).")
+    return 1
+
 def is_collect_screen():
-    """Detects the green 'COLLECT' reward-popup button (shown after a
-    match-3 win and similar rewards, plus turns out to cover BOARD
-    COMPLETE's GO! and other reward-reveal popups too - see
-    find_green_button). Must be checked before is_match3_screen(), since
-    the popup renders on top of the match-3 grid and would otherwise
-    block it from being dismissed."""
-    return find_green_button() is not None
+    """Detects a COLLECT reward button using the established green-shape
+    detector or the exact-text OCR fallback. Must be checked before
+    is_match3_screen(), since the popup renders on top of the match-3 grid
+    and would otherwise block it from being dismissed."""
+    return find_collect_button() is not None
+
+def cmd_collect():
+    """One-off command for the currently visible COLLECT screen.
+
+    Unlike the continuous loop, this explicit action permits exact-text
+    OCR even when the roll pill is visible. It still refuses to tap unless
+    either the established green button detector or literal COLLECT text
+    supplies a concrete coordinate.
+    """
+    screenshot()
+    btn = find_collect_button(require_hidden_roll_pill=False)
+    if not btn:
+        print("No green reward button or exact COLLECT text found - not tapping.")
+        return 1
+    print(f"COLLECT button found at {btn} - tapping it.")
+    tap(*btn)
+    return 0
+
+def _multiplier_consensus(readings):
+    """Require two complete x-number readings; never translate letters to digits."""
+    values = []
+    for text in readings:
+        match = re.fullmatch(r"x\s*([0-9]{1,4})", text.strip(), re.IGNORECASE)
+        if not match:
+            return None
+        values.append(int(match.group(1)))
+    if len(values) == 2 and values[0] == values[1] and 1 <= values[0] <= MULTIPLIER_SANITY_MAX:
+        return values[0]
+    return None
+
+
+_multiplier_preferred_box = None
+
+
+def _multiplier_ocr_fallback():
+    """Re-read the glyphs without the badge rim, in color and a white-text mask."""
+    global _multiplier_preferred_box
+    from PIL import ImageOps
+    image = screen_image()
+    cache_key = ('multiplier_consensus',)
+    if cache_key in _ocr_cache:
+        return _ocr_cache[cache_key]
+    readings = []
+    boxes = [(694, 1722, 772, 1779), (700, 1725, 775, 1780), (700, 1730, 770, 1778)]
+    if _multiplier_preferred_box in boxes:
+        boxes.remove(_multiplier_preferred_box)
+        boxes.insert(0, _multiplier_preferred_box)
+    for box in boxes:
+        crop = image.crop(box).resize(((box[2] - box[0]) * 4, (box[3] - box[1]) * 4))
+        mask = crop.point(lambda p: 255 if p > 235 else 0).convert("L").point(
+            lambda p: 0 if p > 240 else 255)
+        pair = []
+        for variant in (crop, mask):
+            pair.append(ocr_image(ImageOps.expand(variant, border=20, fill="white")))
+        readings.extend(pair)
+        value = _multiplier_consensus(pair)
+        if value is not None:
+            _multiplier_preferred_box = box
+            _ocr_cache[cache_key] = (value, " / ".join(readings))
+            return _ocr_cache[cache_key]
+    _ocr_cache[cache_key] = (None, " / ".join(readings))
+    return _ocr_cache[cache_key]
+
+
 
 def get_multiplier():
-    """OCR the multiplier badge. Tesseract frequently drops the leading
-    'x' on this font, so rather than requiring it, just take the first
-    digit 1-3 found anywhere in the cleaned output."""
-    text = ocr_region((685, 1700, 765, 1785))
-    cleaned = re.sub(r"[^0-9]", "", text)
-    for ch in cleaned:
-        if ch in "123":
-            return int(ch), text
-    return None, text
+    """Accept only two complete matching badge readings, never stray digits."""
+    value, readings = _multiplier_ocr_fallback()
+    return value, f"consensus: {readings}"
+
+
+def _game_has_focus(window_dump):
+    lines = [line for line in window_dump.splitlines() if 'mCurrentFocus=' in line]
+    return len(lines) == 1 and re.search(
+        r'\bu\d+ com\.scopely\.monopolygo/', lines[0]) is not None
+
 
 def tap(x, y):
-    sh(f"{ADB} shell input tap {x} {y}")
+    # Recheck immediately before every tap, including nested reward handlers.
+    try:
+        focus = subprocess.run([ADB, 'shell', 'dumpsys', 'window'],
+                               capture_output=True, text=True, timeout=5)
+        if focus.returncode or not _game_has_focus(focus.stdout):
+            print("Game lacks confirmed focus; blocking tap (payment/overlay protection).")
+            return False
+    except (OSError, subprocess.TimeoutExpired):
+        print("Window focus unavailable; blocking tap.")
+        return False
+    return sh(f"{ADB} shell input tap {x} {y}").returncode == 0
+
+def game_back():
+    """Navigate back only while the game, not billing or another app, has focus."""
+    try:
+        focus = subprocess.run([ADB, 'shell', 'dumpsys', 'window'],
+                               capture_output=True, text=True, timeout=5)
+        if focus.returncode or not _game_has_focus(focus.stdout):
+            return False
+        result = subprocess.run([ADB, 'shell', 'input', 'keyevent', 'KEYCODE_BACK'],
+                                capture_output=True, timeout=5)
+        return result.returncode == 0
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+
+
+class PopupRecovery:
+    def __init__(self):
+        self.first_seen = None
+        self.attempts = 0
+
+    def clear(self):
+        self.first_seen = None
+        self.attempts = 0
+
+    def handle(self):
+        now = time.monotonic()
+        if self.first_seen is None:
+            self.first_seen = now
+        # Give animations time to clear before navigating away.
+        if now - self.first_seen >= 15 and self.attempts < 2:
+            self.attempts += 1
+            report_phase('recovering_popup')
+            print(f'Unknown popup: guarded Android Back attempt {self.attempts}/2.')
+            game_back()
+        else:
+            report_phase('unknown_popup')
+        if now - self.first_seen >= 60:
+            record_diagnostic('unknown_popup')
+        # Observe short animations promptly, without navigating before 15s.
+        # Once both guarded attempts are exhausted, reduce idle CPU usage.
+        time.sleep(2 if self.attempts < 2 else 15)
+
+
+_popup_recovery = PopupRecovery()
+
 
 def _keep_screen_awake():
-    """Wakes the screen and dismisses a lock screen if one is showing.
-    This phone has a real swipe-to-dismiss lock screen (confirmed live
-    2026-09-06 - no PIN/pattern, but waking up alone isn't enough, an
-    actual swipe is needed). A short swipe (not edge-to-edge) is used so
-    that if the screen turns out to already be unlocked on the game board,
-    the accidental camera pan this causes is minor rather than a full-
-    screen drag."""
+    """Wake only. Lock screens/overlays require explicit user dismissal."""
     sh(f"{ADB} shell input keyevent KEYCODE_WAKEUP")
-    sh(f"{ADB} shell input swipe 540 1700 540 1300 250")
+    # Do not swipe blindly across billing sheets, overlays, or the game.
 
-def sleep_keeping_awake(total_s, interval_s=300):
+def sleep_keeping_awake(total_s, interval_s=15):
     """Sleeps for total_s, periodically waking/unlocking the screen so it
     doesn't time out and lock during a long wait with no taps to keep it
     awake naturally (critical for the multi-hour roll-empty backoff). Also
@@ -944,12 +2111,29 @@ def sleep_keeping_awake(total_s, interval_s=300):
     occludes the roll pill, causing a false 'empty' reading), and without
     this it sat unaddressed for the rest of a 2h wait."""
     elapsed = 0.0
+    purchase_guard = PurchaseLoopGuard()
     while elapsed < total_s:
         chunk = min(interval_s, total_s - elapsed)
         time.sleep(chunk)
         elapsed += chunk
         _keep_screen_awake()
         screenshot()
+        if handle_treasure():
+            continue
+        if handle_boutique():
+            continue
+        if handle_house_choices():
+            continue
+        if handle_railroad_chance():
+            continue
+        modal = is_card_popup_screen()
+        if modal and is_wins_screen():
+            cmd_check_wins()
+            continue
+        if not modal:
+            _popup_recovery.clear()
+        if purchase_guard.handle(modal, find_orange_x_button() if modal else None):
+            continue
         if is_quit_dialog_present():
             print("Quit-game dialog detected during backoff wait (unexpected) - tapping CANCEL.")
             tap(*CANCEL_BUTTON)
@@ -959,14 +2143,36 @@ def sleep_keeping_awake(total_s, interval_s=300):
         # explicit user direction, and previously nothing caught this
         # during the backoff wait at all.
         if is_collect_screen():
+            report_phase('collecting_reward')
             print("COLLECT reward popup detected during backoff wait - tapping it.")
             _drain_collect_popups()
             continue
-        if is_build_menu_open():
-            print("BUILD menu found open during backoff wait - closing it.")
-            tap(*BUILD_CLOSE_X)
+        if is_pick_a_box_screen():
+            # Handled automatically as of 2026-09-15 (see cmd_pick_a_box()
+            # - supersedes the old manual-only conclusion in RULES.md).
+            # Previously this occluded the roll pill and got misread as
+            # "rolls empty", which is how a real backoff-wait session
+            # ended up stuck here for the entire 7200s window in the
+            # first place.
+            report_phase('handling_event')
+            print("Pick a Box mini-event detected during backoff wait - handling it.")
+            result = cmd_pick_a_box()
+            if result == 0:
+                screenshot()
+                if get_roll_fill_ratio() >= ROLL_RATIO_EMPTY:
+                    print("Pick a Box cleared with rolls available - ending backoff wait.")
+                    return
+            continue
+        # Specific mini-games must precede BUILD: their grass/art can
+        # match its broad pixel fallback (live Pick a Box, 2026-09-18).
+        if is_bonus_roll_screen():
+            report_phase('handling_event')
+            print("Bonus 'Roll Doubles' event detected during backoff wait - tapping its ROLL button.")
+            tap(*BONUS_ROLL_BUTTON)
+            time.sleep(1.0)
             continue
         if is_color_wheel_screen():
+            report_phase('handling_event')
             print("Color Wheel bonus spinner detected during backoff wait - tapping SPIN.")
             tap(*SPIN_BUTTON)
             time.sleep(2.0)
@@ -977,13 +2183,9 @@ def sleep_keeping_awake(total_s, interval_s=300):
             time.sleep(1.2)
             continue
         if is_match3_screen():
+            report_phase('handling_event')
             print("Match-3 mini-game detected during backoff wait - playing it.")
             cmd_match3()
-            time.sleep(1.0)
-            continue
-        if is_bonus_roll_screen():
-            print("Bonus 'Roll Doubles' event detected during backoff wait - tapping its ROLL button.")
-            tap(*BONUS_ROLL_BUTTON)
             time.sleep(1.0)
             continue
         if is_raid_screen():
@@ -992,39 +2194,34 @@ def sleep_keeping_awake(total_s, interval_s=300):
             # because the raid screen occludes it), and with nothing
             # handling raids during the wait it sat unaddressed for the
             # rest of the 2h - this is the fix.
+            report_phase('handling_event')
             print("Raid screen detected during backoff wait - handling it.")
             cmd_raid()
             time.sleep(1.5)
             continue
-        if is_pick_a_box_screen():
-            # Manual-only (see RULES.md) - same reasoning as the main loop.
-            print("Pick a Box mini-event detected during backoff wait (manual-only) - waiting for you to tap it.")
+        if is_build_menu_open():
+            report_phase('closing_build')
+            print("BUILD menu found open during backoff wait - closing it.")
+            close_build_menu()
+            if get_roll_fill_ratio() >= ROLL_RATIO_EMPTY:
+                return
             continue
         if is_card_popup_screen():
-            # Only search for the orange X once we already know we're on
-            # SOME dimmed popup - searching unconditionally every tick
-            # false-positived against the (undimmed) main board's Farm
-            # Express icon, confirmed live 2026-09-07.
-            x_btn = find_orange_x_button()
-            if x_btn:
-                print(f"Purchase upsell detected during backoff wait - tapping X at {x_btn} (never the card body).")
-                tap(*x_btn)
-                continue
-            print("Card popup detected during backoff wait - tapping center to dismiss.")
-            tap(*CARD_TAP_POINT)
-            time.sleep(1.0)
-            screenshot()
-            if is_card_popup_screen() and not find_orange_x_button():
-                print("Still showing after center tap - trying bottom-center close X fallback.")
-                tap(*GENERIC_BOTTOM_CLOSE_X)
+            _popup_recovery.handle()
             continue
-        if is_build_badge_present():
-            print("BUILD badge detected during backoff wait - opening BUILD.")
-            cmd_build()
+        if maybe_check_wins():
+            continue
+        if maybe_check_side_free_items():
+            continue
+        # Return to rolling before considering another build visit.
         ratio = get_roll_fill_ratio()
         if ratio >= ROLL_RATIO_EMPTY:
             print(f"Rolls have replenished (fill ratio {ratio:.2f}) during backoff wait - ending wait early.")
             return
+        if is_build_badge_present():
+            report_phase('building_while_waiting')
+            cmd_build()
+        report_phase('waiting_for_dice')
         _keep_screen_awake()
 
 def long_press(x, y, duration_s=2.5):
@@ -1053,16 +2250,16 @@ def _roll_action():
     if ratio < ROLL_RATIO_EMPTY:
         print("Pill reads empty (0/0). Not tapping - back off and recheck later.")
         return 2  # distinct code: "empty, caller should back off"
-    print("Rolls available: single tap.")
+    print("Rolls available: sending GO tap (not confirmation of a completed roll).")
     tap(*GO_BUTTON)
     return 0
 
 def _settle_before_long_backoff(max_wait_s=25, interval_s=3.0):
     """Before committing to the long (multi-hour) empty-rolls backoff,
     keep re-checking for a while in case we're actually mid-transition
-    into a raid/match3/bonus-roll/collect screen rather than genuinely
-    idle on the main board with 0 rolls. Confirmed live (2026-09-06): a
-    raid's intro crane/transition animation outlasted a much shorter
+    into a raid/match3/bonus-roll/collect/pick-a-box screen rather than
+    genuinely idle on the main board with 0 rolls. Confirmed live
+    (2026-09-06): a raid's intro crane/transition animation outlasted a much shorter
     (2.5s) double-check gap, so both quick checks landed mid-animation and
     falsely confirmed 'empty' - nearly wasting a full 2h sleep instead of
     handling a real raid with 3 targets. Polling for up to max_wait_s
@@ -1080,6 +2277,7 @@ def _settle_before_long_backoff(max_wait_s=25, interval_s=3.0):
                 or is_collect_screen()
                 or is_color_wheel_screen() or is_match3_screen()
                 or is_bonus_roll_screen()
+                or is_pick_a_box_screen()  # added 2026-09-15 - occludes the roll pill same as the others, and is NOT covered by is_card_popup_screen() (confirmed this screen doesn't dim, it replaces the top bar - see is_pick_a_box_screen())
                 or is_raid_screen()):  # is_collect_screen covers BOARD COMPLETE too
             return False
         if get_roll_fill_ratio() >= ROLL_RATIO_EMPTY:
@@ -1090,15 +2288,157 @@ def cmd_roll():
     screenshot()
     return _roll_action()
 
-def _multiplier_action():
-    """Assumes a screenshot has already been taken."""
+def _multiplier_probe_blocked():
+    """True if some other screen/popup is currently up that the multiplier
+    badge coordinate shouldn't be tapped through (assumes a screenshot has
+    already been taken). Reuses the same detectors cmd_loop() checks before
+    ever reaching _multiplier_action(), so a probe in progress (which taps
+    several times across its own screenshots, unlike the rest of the loop)
+    re-verifies this before every single tap rather than trusting that
+    nothing changed since the probe started."""
+    return (
+        is_quit_dialog_present()
+        or is_collect_screen()
+        or is_pick_a_box_screen()
+        or is_bonus_roll_screen()
+        or is_color_wheel_screen()
+        or is_switch_opponent_menu()
+        or is_match3_screen()
+        or is_raid_screen()
+        or is_build_menu_open()
+        or is_card_popup_screen()  # covers is_purchase_upsell_screen() too
+    )
+
+def _probe_multiplier_max():
+    """Bounded, observed cycling to find the multiplier's actual current
+    cap - never assumes a fixed x3. Taps once, re-screenshots, and
+    compares: as long as the reading keeps climbing, the cap hasn't been
+    hit yet. The first tap that makes the reading go DOWN reveals a
+    wrap-around back toward x1 - the value seen right before that drop was
+    the true cap - and this taps back up to settle there. Returns the
+    confirmed max (int) on success, or None if it couldn't be confirmed
+    (unreadable badge, an unrelated popup appeared mid-probe, or the
+    tap-back-to-max step didn't land) - callers must not guess/fall back to
+    a stale value in that case, just try again later. Bounded by
+    MULTIPLIER_MAX_PROBE_TAPS total taps and never touches GO_BUTTON."""
+    screenshot()
+    mult, raw = get_multiplier()
+    print(f"multiplier detected: {mult} (raw OCR: {raw!r}) - probing for current max.")
+    if mult is None:
+        print("Could not read multiplier via OCR. No action taken.")
+        record_diagnostic('multiplier_unreadable')
+        return None
+
+    seen_max = mult
+    taps = 0
+    while taps < MULTIPLIER_MAX_PROBE_TAPS:
+        screenshot()
+        if _multiplier_probe_blocked():
+            print(f"An unrelated popup/dialog appeared mid-probe; stopping "
+                  f"without further tapping (last confirmed value: x{seen_max}).")
+            return None
+        tap(*MULTIPLIER_BADGE)
+        taps += 1
+        time.sleep(MULTIPLIER_PROBE_SETTLE_S)
+        screenshot()
+        new_mult, raw = get_multiplier()
+        if new_mult is None:
+            print(f"Badge unreadable after tap {taps}; stopping rather than "
+                  f"tapping blind (last confirmed value: x{seen_max}).")
+            return None
+        print(f"after probe tap {taps}: multiplier = x{new_mult} (raw OCR: {raw!r})")
+        if new_mult < seen_max:
+            gap = seen_max - new_mult
+            print(f"Wrap-around detected (x{seen_max} -> x{new_mult}); true "
+                  f"max is x{seen_max}. Tapping {gap} more time(s) to return to it.")
+            cur = new_mult
+            while cur < seen_max and taps < MULTIPLIER_MAX_PROBE_TAPS:
+                screenshot()
+                if _multiplier_probe_blocked():
+                    print(f"An unrelated popup/dialog appeared while returning to "
+                          f"max; stopping at x{cur} rather than tapping through it.")
+                    return None
+                tap(*MULTIPLIER_BADGE)
+                taps += 1
+                time.sleep(MULTIPLIER_PROBE_SETTLE_S)
+                screenshot()
+                cur, raw = get_multiplier()
+                if cur is None:
+                    print("Badge unreadable while returning to max; stopping.")
+                    return None
+            if cur == seen_max:
+                print(f"Settled at observed max: x{seen_max}.")
+                return seen_max
+            print(f"WARNING: expected to land back on x{seen_max} but read "
+                  f"x{cur}; not confirmed, leaving as-is.")
+            return None
+        seen_max = max(seen_max, new_mult)
+    print(f"Hit the {MULTIPLIER_MAX_PROBE_TAPS}-tap safety bound without "
+          f"observing a wrap-around; treating highest confirmed reading "
+          f"x{seen_max} as unconfirmed; stopping without caching a cap.")
+    return None
+
+_multiplier_cache = {"max": None, "probed_at_tick": None}
+
+def _multiplier_action(tick=0):
+    """Assumes a screenshot has already been taken. Taps the multiplier
+    badge up to its currently-available cap. The cap is not hardcoded: it
+    is established via the bounded _probe_multiplier_max() cycle and
+    cached, rather than re-probed every tick, EXCEPT when the on-screen
+    reading exceeds what we last confirmed (the game itself is showing
+    something above our cached cap) or MULTIPLIER_REPROBE_TICKS have
+    passed since the last probe (catches a boosted-rewards event raising
+    the cap mid-session without re-probing, and thus briefly dropping to
+    x1 while re-climbing, on every single tick)."""
     mult, raw = get_multiplier()
     print(f"multiplier detected: {mult} (raw OCR: {raw!r})")
     if mult is None:
         print("Could not read multiplier via OCR. No action taken.")
         return 1
-    if mult >= 3:
-        print("Already at cap (x3). Not tapping (would reset to x1).")
+
+    if _last_die_detected:
+        # Game allows selecting x3 with 1 die but resets to x1 on GO.
+        # Re-probing that reset causes an endless badge cycle.
+        for attempt in range(3):
+            if mult == 1:
+                print('Confirmed last die: using x1 without a maximum probe.')
+                return 0
+            if _multiplier_probe_blocked():
+                return 1
+            tap(*MULTIPLIER_BADGE)
+            time.sleep(MULTIPLIER_PROBE_SETTLE_S)
+            screenshot()
+            mult, _ = get_multiplier()
+            if mult is None:
+                return 1
+        return 0 if mult == 1 else 1
+
+    known_max = _multiplier_cache["max"]
+    due_for_reprobe = (
+        known_max is None
+        or mult != known_max
+        or _multiplier_cache["probed_at_tick"] is None
+        or tick - _multiplier_cache["probed_at_tick"] >= MULTIPLIER_REPROBE_TICKS
+    )
+    if due_for_reprobe:
+        if time.monotonic() < _multiplier_cache.get("retry_after", 0):
+            print("Multiplier verification cooling down; no badge or GO taps.")
+            return 1
+        _multiplier_cache["retry_after"] = time.monotonic() + 60
+        probed = _probe_multiplier_max()
+        if probed is not None:
+            _multiplier_cache["max"] = probed
+            _multiplier_cache["probed_at_tick"] = tick
+            # The probe already settled at the maximum. The earlier reading is stale.
+            return 0
+        # A popup or unreadable badge can interrupt a re-probe. Never tap based
+        # on the old reading/cache after it failed.
+        _multiplier_cache["max"] = None
+        _multiplier_cache["probed_at_tick"] = None
+        return 1
+
+    if mult >= known_max:
+        print(f"Already at observed max (x{known_max}). Not tapping (would reset to x1).")
         return 0
     print("Tapping multiplier to increase.")
     tap(*MULTIPLIER_BADGE)
@@ -1108,6 +2448,14 @@ def cmd_multiplier():
     screenshot()
     return _multiplier_action()
 
+def cmd_multiplier_max():
+    """Manual/verification entry point: run exactly one bounded probe pass
+    and report the confirmed max, without relying on or mutating the
+    cross-tick cache that cmd_loop() uses (so it's safe to run standalone
+    against a live device for verification)."""
+    result = _probe_multiplier_max()
+    return 0 if result is not None else 1
+
 def cmd_status():
     screenshot()
     ratio = get_roll_fill_ratio()
@@ -1116,79 +2464,94 @@ def cmd_status():
     print(f"multiplier: {mult} (raw: {raw2!r})")
     return 0
 
-def cmd_build(rounds=6):
-    """Open BUILD, tap every card slot repeatedly (harmless no-op once
-    unaffordable/maxed), close. Does not check cash vs price - relies on
-    the game silently no-op'ing on a card you can't afford.
+_last_build_visit = float("-inf")
+BUILD_VISIT_COOLDOWN_S = 30
+_build_close_retry_after = 0.0
 
-    Taps each of the 5 slots up to `rounds` times per visit, not just
-    once. Confirmed live 2026-09-06 that buying a card doesn't leave that
-    slot empty - the next purchasable item slides into the same position,
-    so repeated taps on one slot can consume several sequential purchases
-    (one live test bought 6 buildings across 5 slots in a single manual
-    pass). A single tap per slot was leaving cash unspent: confirmed live
-    2026-09-07 (user report: "it is sitting on 451k" with the badge still
-    showing pending purchases) - one visit only ever touched the first
-    affordable item per slot, then moved on, even when much more was
-    still affordable afterward. Extra taps past what's actually available
-    are harmless no-ops, so this errs toward buying too much rather than
-    too little.
 
-    Verifies the close actually worked and retries a few times if not -
-    confirmed live 2026-09-07 that a single unverified close tap can fail
-    to register, leaving the bot stuck inside the BUILD menu with nothing
-    else recognizing or recovering from that state (it sat there for the
-    rest of a 2h backoff wait).
-
-    Per-tap delay is 0.15s (down from 0.5s, 2026-09-07 speed-up request) -
-    this loop stays inside one already-open static menu the whole time
-    (no screen transition per tap), so it doesn't need the longer settle
-    time that transition-triggering taps elsewhere in this file require.
-
-    Verifies the menu actually opened before tapping any card slots -
-    confirmed live 2026-09-07 that cash can pile up unspent (user report:
-    "we are at 2 million... I think it forgot to build") because the open
-    tap can silently miss when it lands at the same moment as an unrelated
-    animation (caught live: a dice-roll 'DOUBLES' overlay was showing over
-    the main board at the exact instant the BUILD tap fired). Without this
-    check, cmd_build tapped the 5 card-slot coordinates against whatever
-    WAS on screen (the board, mid-animation), then found the menu already
-    "closed" (it was never open) and reported success having bought
-    nothing - a silent no-op that looked identical to a normal successful
-    visit in the logs. Retries the open tap a few times before giving up.
-
-    Waits 1.8s (not 1.0s) before the first open check - confirmed live
-    2026-09-07 the menu's open animation consistently needs ~2s to fully
-    render the price text the OCR fallback reads, so 1.0s reliably burned
-    2 guaranteed-fail retries (with their own screenshot+OCR cost) before
-    succeeding on the 3rd every single time."""
-    print("Opening BUILD menu.")
-    opened = False
-    for attempt in range(4):
-        tap(*BUILD_ICON)
-        time.sleep(1.8)
-        screenshot()
-        if is_build_menu_open():
-            opened = True
-            break
-        print(f"BUILD menu did not open after tap (attempt {attempt + 1}/4) - retrying.")
-    if not opened:
-        print("WARNING: BUILD menu never opened - skipping this visit rather than tapping blind.")
+def close_build_menu():
+    """Bounded close, with a fresh frame before and after every action."""
+    global _build_close_retry_after
+    if time.monotonic() < _build_close_retry_after:
+        report_phase('build_close_cooldown')
+        time.sleep(15)
         return 1
-    for _ in range(rounds):
-        for x in BUILD_CARD_XS:
-            tap(x, BUILD_CARD_Y)
-            time.sleep(0.15)
-    print("Closing BUILD menu.")
     for attempt in range(4):
+        screenshot()
+        if not is_build_menu_open():
+            return 0
+        print(f"Closing confirmed BUILD menu (attempt {attempt + 1}/4).")
         tap(*BUILD_CLOSE_X)
+        time.sleep(1.0)
+    screenshot()
+    if not is_build_menu_open():
+        return 0
+    print('BUILD close button failed; trying guarded Android Back once.')
+    if game_back():
         time.sleep(1.0)
         screenshot()
         if not is_build_menu_open():
             return 0
-        print(f"BUILD menu still open after close tap (attempt {attempt + 1}/4) - retrying.")
-    print("WARNING: BUILD menu still open after 4 close attempts - giving up for this tick.")
+    _build_close_retry_after = time.monotonic() + 60
+    report_phase('build_close_cooldown')
+    print('WARNING: BUILD close failed; no further close taps for 60s.')
     return 1
+
+
+def cmd_build(rounds=2):
+    """Bounded build visit: confirm the menu, recheck each tap, then close.
+
+    At most two rounds or ten seconds of card actions per visit. A 30s
+    cooldown prevents a persistent badge from monopolizing gameplay.
+    Specific event detection guards opening from a stale board frame.
+    """
+    global _last_build_visit
+    screenshot()
+    opened = is_build_menu_open()
+    if not opened and time.monotonic() - _last_build_visit < BUILD_VISIT_COOLDOWN_S:
+        return 0
+    _last_build_visit = time.monotonic()
+    if not opened:
+        # Never use the badge sampled before GO: a reward/animation can
+        # replace the board between the roll and this build visit.
+        if _multiplier_probe_blocked():
+            return 1
+        print("Opening BUILD menu.")
+        tap(*BUILD_ICON)
+        for _ in range(4):
+            time.sleep(0.6)
+            screenshot()
+            if is_build_menu_open():
+                opened = True
+                break
+        if not opened:
+            print("BUILD opening not confirmed; no card taps, retry after cooldown.")
+            return 1
+    deadline = time.monotonic() + 10
+    for _ in range(min(rounds, 2)):
+        for x in BUILD_CARD_XS:
+            screenshot()
+            if not is_build_menu_open():
+                print("BUILD screen changed; returning to main screen handling.")
+                return 0
+            if time.monotonic() >= deadline:
+                return close_build_menu()
+            tap(x, BUILD_CARD_Y)
+            time.sleep(0.15)
+    return close_build_menu()
+
+
+def maybe_build_before_roll(tick):
+    """Visit BUILD on the evaluated board, never immediately after GO."""
+    if time.monotonic() - _last_build_visit < BUILD_VISIT_COOLDOWN_S:
+        return False
+    if not is_build_badge_present() and not (tick > 0 and tick % 277 == 0):
+        return False
+    report_phase('building_before_roll')
+    cmd_build()
+    # Always re-evaluate after a visit, including failed opens or a board change.
+    return True
+
 
 def cmd_match3():
     """Blind-flip all 12 tiles in the 'Match 3 to steal' mini-game grid.
@@ -1206,7 +2569,31 @@ def cmd_match3():
             time.sleep(0.25)
     return 0
 
-def cmd_loop(interval_s=1.3):
+class PurchaseLoopGuard:
+    """Cap dismissal attempts across chained offers until the modal clears."""
+    def __init__(self):
+        self.attempts = 0
+
+    def handle(self, modal, close_button):
+        if not modal:
+            self.attempts = 0
+            return False
+        if close_button is None:
+            return False
+        if self.attempts < 2:
+            self.attempts += 1
+            report_phase("closing_purchase_popup")
+            print(f"Purchase popup: close-only attempt {self.attempts}/2.")
+            tap(*close_button)
+            time.sleep(1.2)
+        else:
+            report_phase("purchase_popup_blocked")
+            print("Purchase popup persists; pausing taps until the screen clears.")
+            time.sleep(15)
+        return True
+
+
+def cmd_loop(interval_s=0.35):
     """Tie it all together: dismiss any Chance/Community Chest/other card
     popup (dimmed-board overlay, any interior color/content), keep
     rolling, top up the multiplier, open BUILD whenever its red badge
@@ -1230,10 +2617,30 @@ def cmd_loop(interval_s=1.3):
           f"multiplier + badge-driven build + match-3 auto-play + "
           f"bonus-roll-event + raid-target tapping + collect-popup "
           f"dismissal), checking every {interval_s}s. Ctrl-C to stop.")
+    global _continuous_mode
+    _continuous_mode = True
     tick = 0
+    purchase_guard = PurchaseLoopGuard()
     try:
         while True:
             screenshot()
+            report_phase("evaluating_screen")
+            if handle_treasure():
+                continue
+            if handle_boutique():
+                continue
+            if handle_house_choices():
+                continue
+            if handle_railroad_chance():
+                continue
+            modal = is_card_popup_screen()
+            if modal and is_wins_screen():
+                cmd_check_wins()
+                continue
+            if not modal:
+                _popup_recovery.clear()
+            if purchase_guard.handle(modal, find_orange_x_button() if modal else None):
+                continue
             if is_quit_dialog_present():
                 print("Quit-game dialog detected (unexpected) - tapping CANCEL.")
                 tap(*CANCEL_BUTTON)
@@ -1246,43 +2653,22 @@ def cmd_loop(interval_s=1.3):
             # other branch - a chained reward popup can appear on top of
             # almost any other state.
             if is_collect_screen():
+                report_phase('collecting_reward')
                 print("COLLECT reward popup detected - tapping it.")
                 _drain_collect_popups()
                 continue
-            if is_build_menu_open():
-                print("BUILD menu found open (unexpectedly) - closing it.")
-                tap(*BUILD_CLOSE_X)
-                time.sleep(1.0)
-                continue
-            if is_color_wheel_screen():
-                print("Color Wheel bonus spinner detected - tapping SPIN.")
-                tap(*SPIN_BUTTON)
-                time.sleep(2.5)
-                continue
             if is_pick_a_box_screen():
-                # Manual-only (see RULES.md - 5 touch-injection techniques
-                # all failed to register on the crates). Checked before the
-                # generic card-popup branch below so it doesn't waste
-                # cycles/log spam repeatedly center-tapping and X-fallback
-                # tapping a screen that never responds to either.
-                print("Pick a Box mini-event detected (manual-only - ADB touch doesn't register here) - waiting for you to tap it.")
-                time.sleep(5.0)
-                continue
-            if is_switch_opponent_menu():
-                # Now OCR-confirmed (not just color), safe as a top-level
-                # check again - re-added 2026-09-07 after confirming live
-                # this screen can otherwise sit stuck indefinitely. Checked
-                # before the generic card-popup branch below - moved
-                # 2026-09-11 alongside match3/bonus-roll/raid (see note
-                # there for why).
-                print("Switch-opponent menu detected - picking Random Player.")
-                tap(*RANDOM_PLAYER_GO_BUTTON)
-                time.sleep(1.2)
-                continue
-            if is_match3_screen():
-                print("Match-3 mini-game detected - playing it.")
-                cmd_match3()
-                time.sleep(1.0)
+                # Handled automatically as of 2026-09-15 (see
+                # cmd_pick_a_box() - supersedes RULES.md's older "5
+                # touch-injection techniques all failed" conclusion; those
+                # attempts targeted the crates' own coordinates rather
+                # than GO_BUTTON, which is what turned out to work).
+                # Checked before the generic card-popup branch below so it
+                # doesn't waste cycles/log spam repeatedly center-tapping
+                # and X-fallback tapping a screen that has its own
+                # dedicated handler.
+                if cmd_pick_a_box() != 0:
+                    time.sleep(PICK_A_BOX_FAILURE_BACKOFF_S)
                 continue
             if is_bonus_roll_screen():
                 # Checked before the generic card-popup branch below -
@@ -1300,9 +2686,38 @@ def cmd_loop(interval_s=1.3):
                 tap(*BONUS_ROLL_BUTTON)
                 time.sleep(1.0)
                 continue
+            if is_color_wheel_screen():
+                report_phase('handling_event')
+                print("Color Wheel bonus spinner detected - tapping SPIN.")
+                tap(*SPIN_BUTTON)
+                time.sleep(2.5)
+                continue
+            if is_switch_opponent_menu():
+                # Now OCR-confirmed (not just color), safe as a top-level
+                # check again - re-added 2026-09-07 after confirming live
+                # this screen can otherwise sit stuck indefinitely. Checked
+                # before the generic card-popup branch below - moved
+                # 2026-09-11 alongside match3/bonus-roll/raid (see note
+                # there for why).
+                print("Switch-opponent menu detected - picking Random Player.")
+                tap(*RANDOM_PLAYER_GO_BUTTON)
+                time.sleep(1.2)
+                continue
+            if is_match3_screen():
+                print("Match-3 mini-game detected - playing it.")
+                cmd_match3()
+                time.sleep(1.0)
+                continue
             if is_raid_screen():
                 cmd_raid()
                 time.sleep(1.5)
+                continue
+            # Specific mini-games must precede BUILD: their grass/art can
+            # match its broad pixel fallback (live Pick a Box, 2026-09-18).
+            if is_build_menu_open():
+                report_phase('closing_build')
+                print("BUILD menu found open (unexpectedly) - closing it.")
+                close_build_menu()
                 continue
             if is_card_popup_screen():
                 # Generic fallback for any OTHER dimmed popup we don't
@@ -1315,21 +2730,31 @@ def cmd_loop(interval_s=1.3):
                 # on SOME dimmed popup - searching unconditionally every
                 # tick false-positived against the (undimmed) main board's
                 # Farm Express icon, confirmed live 2026-09-07.
-                x_btn = find_orange_x_button()
-                if x_btn:
-                    print(f"Purchase upsell detected - tapping X at {x_btn} only (never the card body - real money at stake).")
-                    tap(*x_btn)
-                    time.sleep(1.2)
-                    continue
-                print("Card popup detected (dimmed board) - tapping center to dismiss.")
-                tap(*CARD_TAP_POINT)
-                time.sleep(1.2)
-                screenshot()
-                if is_card_popup_screen() and not find_orange_x_button():
-                    print("Still showing after center tap - trying bottom-center close X fallback.")
-                    tap(*GENERIC_BOTTOM_CLOSE_X)
-                    time.sleep(1.2)
+                _popup_recovery.handle()
                 continue
+            if maybe_check_wins():
+                continue
+            if maybe_check_side_free_items():
+                continue
+            # No dice means no useful multiplier probe. The game may reset
+            # its badge at zero; cycling it here prevented reaching backoff.
+            if get_roll_fill_ratio() < ROLL_RATIO_EMPTY:
+                if _settle_before_long_backoff():
+                    report_phase("waiting_for_dice")
+                    print("No dice available; monitoring every 15s without multiplier taps.")
+                    cleanup_temp_images()
+                    sleep_keeping_awake(ROLL_EMPTY_BACKOFF_S)
+                    _keep_screen_awake()
+                continue
+            if maybe_build_before_roll(tick):
+                continue
+            if _multiplier_action(tick) != 0:
+                time.sleep(interval_s)
+                continue
+            screenshot()
+            if _multiplier_probe_blocked():
+                continue
+            report_phase("rolling")
             roll_result = _roll_action()
             if roll_result == 2:
                 if _settle_before_long_backoff():
@@ -1340,36 +2765,28 @@ def cmd_loop(interval_s=1.3):
                 else:
                     print("Screen changed during settle-check - re-evaluating immediately.")
                 continue
-            _multiplier_action()
             tick += 1
-            if is_build_badge_present():
-                print("BUILD badge detected - opening BUILD.")
-                cmd_build()
-            elif tick % 277 == 0:  # ~6min fallback safety net in case the
-                                    # badge check ever misses something -
-                                    # tick count scaled for interval_s=1.3
-                                    # (was 90 @ 4s/tick, same 360s cadence)
-                cmd_build()
-            if is_shop_badge_present():
-                cmd_check_shop()
-            if tick % 1385 == 0:  # ~30min: WINS has no reliable badge, so
-                                   # it's checked on a fixed schedule instead -
-                                   # tick count scaled for interval_s=1.3
-                                   # (was 450 @ 4s/tick, same 1800s cadence)
-                cmd_check_wins()
+            # Store badges persist after free gifts and can cause purchase loops.
+            # Shop visits are explicit-only; never reopen them from this loop.
             time.sleep(interval_s)
     except KeyboardInterrupt:
         print("Loop stopped.")
+    finally:
+        _continuous_mode = False
+        report_phase("stopped")
     return 0
 
 def usage():
-    print("Usage: monopoly-go-assist {roll|multiplier|build|match3|raid|shop|wins|loop|status}")
+    print("Usage: monopoly-go-assist {roll|multiplier|multiplier-max|build|match3|raid|collect|shop|wins|loop|status}")
     print()
     print("roll       - single-tap GO if the roll pill isn't empty")
-    print("multiplier - OCR multiplier badge, tap it unless already at the x3 cap")
+    print("multiplier - OCR multiplier badge, tap it unless already at the observed cap")
+    print("multiplier-max - bounded probe: cycle the badge to find/settle at its")
+    print("             currently-available max (detects wrap-around, not a fixed x3)")
     print("build      - open BUILD, tap all 5 cards once, close")
     print("match3     - blind-flip all 12 tiles in the match-3 mini-game grid")
     print("raid       - find a raid target reticle and tap it (no smoke-avoidance)")
+    print("collect    - find and tap the current COLLECT reward button")
     print("shop       - check the shop for a free daily gift (OCR-gated, never")
     print("             taps a real-money purchase button)")
     print("wins       - claim all available Quick Wins / milestone rewards")
@@ -1382,15 +2799,25 @@ if __name__ == "__main__":
     actions = {
         "roll": cmd_roll,
         "multiplier": cmd_multiplier,
+        "multiplier-max": cmd_multiplier_max,
         "build": cmd_build,
         "match3": cmd_match3,
         "raid": cmd_raid,
+        "collect": cmd_collect,
         "shop": cmd_check_shop,
         "wins": cmd_check_wins,
         "loop": cmd_loop,
         "status": cmd_status,
     }
     if cmd in actions:
+        if cmd == 'loop':
+            import fcntl
+            lock_file = open('/tmp/monopoly-go-assist.lock', 'a')
+            try:
+                fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                print('Another automation loop owns the device; not starting a second loop.')
+                sys.exit(75)
         sys.exit(actions[cmd]())
     usage()
     sys.exit(1)

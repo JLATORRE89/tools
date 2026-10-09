@@ -1,5 +1,86 @@
 # Monopoly GO Automation Notes
 
+## 2026-10-09 Halloween title separator recovery
+
+The current house-choice screen was repeatedly sent through BUILD and raid
+fallbacks. Five calibrated rings were correctly detected, but title OCR returned
+`AgileGopher42’s |` followed by `Board`, causing the whitespace-only title matcher
+to fail. The title predicate now accepts the observed vertical separator and
+whitespace between the possessive name and the complete word BOARD. It still
+requires multiple ring targets and rejects misspelled words, prices and unrelated
+text. Existing two-attempt bounds, foreground and purchase protections remain.
+
+134 tests passed on Windows and the active Pi. A live guarded choice reduced
+the available rings from five to four and increased treats from zero to nine.
+The restarted single loop made subsequent choices, returned to normal board
+play and resumed verified multiplier/roll handling. Boutique remains default-off.
+See MINIGAME_HISTORY.md for dated support milestones and Git-note annotations.
+
+## 2026-10-06 GO sparkle false BUILD recovery
+
+The live main board was repeatedly treated as an open BUILD menu: its GO
+sparkles satisfied the broad green-icon fallback while block OCR read
+`WINS | BUILD | | ALBUM | FRIENDS` but omitted the visible dice fraction.
+All four exact navigation labels in the existing bottom-footer crop now
+exclude BUILD independently of dice OCR. If sparkle-heavy block segmentation
+also misses a navigation label, read the calibrated text-only navigation row
+(0,2200,1080,2260) with PSM 7 before considering green icons. Partial navigation still requires
+the prior dice-fraction evidence; genuine BUILD city/progress and price
+fallbacks remain. This is not a blanket exemption for green pixels.
+
+Captured a 15-second video and five successive screenshots with different
+sparkle patterns. The regression fails before the change; 127 offline tests
+pass on Windows. Pi frame validation and deployment are recorded in TASKS.md.
+Boutique autoplay remains default-off and its unfinished development deferred.
+
+Active host: rpi3, user service `monopoly-assist.service`. LocalNet retains
+synchronized fallback copies but its old supervisor stays inactive while the
+phone is attached to the Pi. Windows source and localnet-bin mirror must match;
+the Pi runtime differs only in its `/usr/bin/adb` executable path.
+
+Live monitoring also exposed a false Color Wheel classification on a genuine
+BUILD menu: its green scenery matches the historical single color sample.
+That sample now only triggers a title check; exact COLOR WHEEL text is required
+before SPIN handling. BUILD/scenery, Net Worth Gallery and unknown text fail
+that check. 129 regression tests pass; legitimate live Color Wheel title OCR
+will be verified when that event is encountered.
+
+## Side-icon free items (2026-10-04, source implementation)
+
+Both rolling and dice-wait paths check every five minutes, using a fresh capture
+and verified main-board footer. Scan both side strips for high-confidence,
+standalone FREE/FREE! labels; use their current OCR positions, never a stored
+tap coordinate. Icons without a readable FREE label are not opened. Each icon
+position has a fifteen-minute revisit cooldown; one icon is examined per visit.
+
+Inside an offer, require a recognized DAILY GIFT/FREE GIFT/FREE REWARD context,
+one exact FREE label, a matching green button shape and a second exact local OCR
+read. Reject prices, locked/conditional labels, ads, unclear geometry and detected
+purchase popups. Keep the general reward-label rule rejecting FREE unchanged;
+this is a separate narrowly gated handler. Up to three freshly verified free
+stages per visit, then existing guarded collection/one guarded Back. No purchase,
+paid unlock, inventory spending, billing interaction or automatic shop polling.
+
+113 offline tests pass. Live side-icon/font/layout verification and Pi deployment
+are pending the current Pi SSH connection; localnet is inactive with no ADB device.
+Mixed paid/free offer screens are deliberately skipped. This does not claim
+support for every side event or for icons without visible FREE text.
+
+## Raspberry Pi performance update (2026-10-02)
+
+Optional in-process OCR (`MONOPOLY_INPROCESS_OCR=1`, `python3-tesserocr`)
+reuses the English language model but clears recognition/adaptive state for
+every image. Recognition is bounded to 30 seconds; timeout returns no text.
+Exact reward labels, dual complete multiplier consensus, fresh focus checks,
+and existing animation settling remain mandatory. CLI OCR remains the default
+outside the Pi service. Green-button and raid connected components use direct
+grid-neighbor lookup with the same two-grid-step neighborhood and thresholds.
+Saved Pi reward-screen comparison: identical outputs for 13 detector calls,
+16.132s baseline versus 4.053s optimized (includes first OCR initialization).
+This is a detector benchmark, not a fourfold end-to-end gameplay claim.
+98 regression tests pass, including native OCR state reset/timeout/fallback,
+TSV coordinate handling, and two-step green-component connectivity.
+
 Confirmed working rules and coordinates from live testing on the real phone
 (device screen: 1080x2340). All screenshots via
 `adb exec-out screencap -p`; all taps via `adb shell input tap X Y`.
@@ -87,10 +168,15 @@ unreliable — every coordinate bug we hit this session came from that.
 
 ### Multiplier badge (next to GO button)
 - Appears after a tutorial prompt; badge coordinates this session: **(725, 1740)**.
-- Tapping is free (no cash/roll cost) and cycles: **x1 → x2 → x3 → back to x1**.
-- **x3 is the effective cap.** A 4th tap resets to x1 — do NOT tap a 3rd
-  time if already at x2 and about to roll; stop at x3.
-- Popup "ALL REWARDS x2 / x3" confirms the current multiplier level.
+- Tapping is free (no cash/roll cost) and cycles: **x1 → x2 → ... → cap → back to x1**.
+- **The cap is NOT assumed fixed at x3.** x3 was the only ceiling ever
+  observed as of 2026-09-06, but nothing guarantees a live boosted-rewards
+  event can't raise it - see "Multiplier max: bounded observed cycling
+  (2026-09-19)" below for how the automation now discovers the real,
+  currently-available cap instead of hardcoding one, and do NOT reintroduce
+  a hardcoded cap assumption without live re-confirmation.
+- Popup "ALL REWARDS x2 / x3" confirms the current multiplier level (also
+  seen at higher values during boosted events, per the same popup pattern).
 
 ### BUILD (bottom nav, hammer icon)
 - Icon center this session: **(256, 2137)** — NOT (257, 1591), which was a
@@ -673,7 +759,7 @@ Reference copies of all of these live in
   comments describing them.
 - **`monopoly-go-supervisor` now also auto-starts at boot via systemd**
   (`/etc/systemd/system/monopoly-go-supervisor.service`, oneshot,
-  `ExecStart=/home/jason/bin/monopoly-go-supervisor start`, enabled via
+  `ExecStart=${SERVICE_USER_HOME}/bin/monopoly-go-supervisor start`, enabled via
   `systemctl enable`). This does NOT replace the existing bash supervisor
   or change how the user starts/stops/checks it day-to-day - the bash
   script's own PID-file guard means running `start` again (whether by the
@@ -898,6 +984,20 @@ Reference copies of all of these live in
   buttons here - but wasted cycles and log spam). Now it just prints once
   and waits 5s between checks until the user taps a box themselves and
   the screen naturally changes underneath it.
+- **SUPERSEDED 2026-09-15 - both the "manual-only" conclusion above and
+  the `is_card_popup_screen()` gate on `is_pick_a_box_screen()` turned out
+  to be wrong.** New live evidence: a plain `input tap` at the calibrated
+  `GO_BUTTON` point (539,1901) reliably completes the box-pick, and this
+  screen never actually dims the board in the first place (so the gate
+  silently suppressed detection through the normal loop this whole time -
+  every prior "5 techniques failed" test was necessarily an ad-hoc tap
+  issued outside this script, since the automation itself could never
+  recognize the screen to attempt one). See the dated section near the
+  end of this file ("2026-09-15: Pick a Box mini-event - manual-only
+  conclusion overturned") for the full root-cause writeup and the current
+  automated handling (`cmd_pick_a_box()`). **Do not reintroduce a
+  dimmed-board gate on this detector, and do not re-mark this
+  manual-only, without fresh live evidence.**
 
 ## 2026-09-07 fixes (build depth, build-menu reskin detection, stuck-loop
    false positive, tap speed)
@@ -1006,6 +1106,123 @@ Reference copies of all of these live in
   automatically, but the daemon itself needed the manual kill/start cycle
   to actually recover connectivity.
 
+## 2026-09-15: Pick a Box mini-event - manual-only conclusion overturned
+- **User report**: 3-4 crates are shown at the bottom of the "Infinite
+  Harvest / PICK A BOX" screen, and one of them is *always* positioned
+  directly over the calibrated `GO_BUTTON` point (539,1901) regardless of
+  how many crates are showing. Live screenshots captured for this fix:
+  `mg_live_screen.png` (sealed crates, event just appeared),
+  `mg_after_center_tap.png` (crates open/revealed - basket, empty,
+  watering can - right after a tap at 539,1901), `mg_after_settle.png`
+  (a few seconds later: the screen has auto-transitioned back to the
+  normal main board, cash bar and GO button both visible again).
+- **Root cause #1 - the loop never even recognized this screen.**
+  `is_pick_a_box_screen()` was gated behind `is_card_popup_screen()` (the
+  dimmed-cash-bar check used for Chance/Community Chest/purchase-upsell
+  popups), copied by analogy from `find_orange_x_button()`'s gate when it
+  was added on 2026-09-07 - but that gate was never actually confirmed
+  live against a real Pick a Box screenshot, unlike every other gate in
+  this file. Checked against `mg_live_screen.png`: this screen does not
+  dim the existing UI at all - it fully replaces the top bar with
+  different background scenery (no cash figure, no profile picture), so
+  `CARD_DIM_CHECK_POINT` never reads dark here and the gate returned
+  `False` on every real occurrence. Practical consequence, confirmed live:
+  this screen also occludes the roll pill, so with the detector silently
+  disabled, the loop fell through to `cmd_roll()`'s empty-pill check,
+  read it as genuinely 0 rolls, and committed to the full
+  `ROLL_EMPTY_BACKOFF_S` (7200s / 2h) backoff - the user found the loop
+  sitting stuck on this exact screen for the entire window. This also
+  means the 2026-09-07 "5 touch-injection techniques all failed"
+  conclusion was drawn from taps issued directly at the crates from
+  *outside* this script (ad-hoc diagnostic testing) - the automation's own
+  detector had never once fired to attempt a real tap through the normal
+  code path.
+- **Root cause #2 (the actual overturned conclusion) - touch injection
+  does work here; targeting was the problem.** While the loop was
+  confirmed stuck in the 7200s backoff on this screen, a plain
+  `adb shell input tap 539 1901` was issued manually - the exact same
+  `input tap` primitive already tried and dismissed as non-working back on
+  2026-09-07. Before/after screenshots confirm the tap registered and
+  completed a box pick (`mg_after_center_tap.png` → `mg_after_settle.png`
+  above). The most likely explanation: the 2026-09-07 attempts tapped
+  coordinates read/guessed directly off the crates' own on-screen
+  position, and those were apparently not precise enough to land inside
+  this Unity element's real hit target (which may be smaller/more exact
+  than the visible crate art suggests) - a targeting problem, not the
+  "hard OS permission wall" the `sendevent`/SELinux investigation
+  separately and correctly confirmed for *raw* touch replay. The
+  high-level `input tap` primitive itself was never actually the blocked
+  layer.
+- **Fix applied**: `is_pick_a_box_screen()` no longer depends on
+  `is_card_popup_screen()` - it now OCRs `PICK_A_BOX_OCR_REGION` directly
+  and unconditionally every check (same cost profile as the
+  already-unconditional multiplier-badge OCR in `_multiplier_action()`).
+  This deliberately trades a small, bounded per-tick OCR cost for
+  correctness, since an unverified color gate is exactly what caused this
+  bug - a cheap pre-filter can be added later, but only if calibrated
+  against a real live screenshot on the deployment host, never guessed.
+  A new `cmd_pick_a_box()` taps `GO_BUTTON`, then polls (up to
+  `PICK_A_BOX_POLL_ROUNDS` x `PICK_A_BOX_POLL_S` ≈ 10.5s) for either the
+  screen to actually leave the Pick a Box event or a reward `COLLECT`
+  popup to appear - a single immediate re-check can't tell "tap missed"
+  apart from "tap landed, box-reveal animation still playing" (confirmed
+  live: the OCR text still reads "PICK A BOX" while the crates are shown
+  open with revealed contents, before the auto-transition back to the
+  main board). Bounded to `PICK_A_BOX_TAP_RETRIES` (3) total tap attempts
+  before giving up and waiting 60s between later attempts, in case the
+  `GO_BUTTON`/crate overlap ever stops holding (reskin, layout shift, or a
+  genuine future touch-injection regression). Wired into both `cmd_loop()`
+  and `sleep_keeping_awake()` in place of the old print-and-wait branch,
+  and added to `_settle_before_long_backoff()`'s recognized-screen list
+  (it wasn't covered by `is_card_popup_screen()` there either, for the
+  same reason). If a box clears during the long roll backoff and rolls are
+  visible again, the wait ends immediately so the loop resumes rolling.
+- **Safety**: `cmd_pick_a_box()` is only ever invoked after
+  `is_pick_a_box_screen()`'s OCR match on "PICK" + "BOX" in the narrow
+  banner region - it is never reachable from the generic card-popup or
+  purchase-upsell branches, and taps only the single fixed `GO_BUTTON`
+  point (never a dynamically-found button near price/buy text), so this
+  carries none of the real-money risk the purchase-upsell handling guards
+  against.
+- **Offline tests**: `test_monopoly_go_assist.py` (new file, same
+  directory) covers `_pick_a_box_ocr_matches()`'s text matching, the
+  `is_card_popup_screen()`-independence regression, and
+  `cmd_pick_a_box()`'s tap/poll/retry control flow (success, chained
+  reward popup, mid-animation false-failure avoidance, bounded give-up) -
+  all via monkeypatched module functions, no real device/Pillow/tesseract
+  required. Run with `python test_monopoly_go_assist.py`. **Not yet run
+  against the real device** - the next live session should confirm
+  `cmd_pick_a_box()` end-to-end against a real, freshly-appeared Pick a
+  Box screen (not just the retroactive before/after screenshots this fix
+  was based on) and update this entry with the result.
+
+## 2026-09-16: COLLECT exact-text fallback and direct command
+- The existing reward handler only found wide green buttons in the narrow
+  bottom band `y=2100..2340`. A user-reported current reward screen needed
+  COLLECT tapping but did not match that established color/layout rule.
+- Added `find_collect_button()`: it preserves `find_green_button()` as the
+  fast first choice, then uses Tesseract TSV to locate only the literal
+  word `COLLECT` below the fixed top HUD. In the continuous loop, the OCR
+  fallback is allowed only when the roll pill is hidden, which is the same
+  symptom reward overlays produce and prevents full-screen OCR/tapping
+  during ordinary rolling.
+- Added `monopoly-go-assist collect` for an explicit one-off action on the
+  current screen. It screenshots, finds either the established green
+  reward button or exact COLLECT text, and refuses to tap if neither is
+  present. `_drain_collect_popups()` uses the same finder so chained
+  differently-colored or vertically-shifted COLLECT screens are handled.
+- The exact-text parser is covered by offline tests for coordinates,
+  punctuation/case, partial-word rejection, low confidence, and top-HUD
+  rejection.
+- Live calibration found expired-event leaderboards with their green
+  `COLLECT` button at approximately `(538, 1894)`, directly over the normal
+  GO-button area rather than in the historic `y>=2100` reward band. The
+  detector now checks this center band only when the top HUD is dimmed by a
+  modal and only accepts a green button overlapping `GO_BUTTON`; those gates
+  retain the earlier protection against flat green lawn false positives on
+  ordinary boards. The first live tap revealed a 172,000 cash reward and a
+  chained standard-band COLLECT popup.
+
 ## Known device/session facts
 - Phone connected via USB (wireless debugging blocked by the phone being on
   a different Wi-Fi subnet than localnet, which has no wireless adapter).
@@ -1013,3 +1230,314 @@ Reference copies of all of these live in
 - The Android emulator (AVD) crashes on this specific game due to a
   Berberis (ARM translation layer) bug — unrelated to any of the above;
   the real phone has no such issue.
+
+### 2026-09-18: Specific mini-games precede broad screen detectors
+A captured live Infinite Harvest PICK A BOX screen simultaneously returned true
+for is_pick_a_box_screen(), is_build_menu_open(), and is_color_wheel_screen().
+The live and Windows scripts had identical hashes before repair; no file revert
+was found. Both cmd_loop() and sleep_keeping_awake() now check Pick a Box and
+purple Roll Doubles before the broad color-wheel and BUILD checks. BUILD is
+after the remaining specific mini-games and before generic popup dismissal.
+Preserve this precedence: dedicated handlers can overlap broad color heuristics.
+Regression tests deliberately make BUILD and color wheel true while each target
+event is active, exercising both loops. Live box cleared on first calibrated GO
+tap and normal rolls resumed. Purple priority is regression-tested; live jail
+verification is recorded in TASKS.md when available.
+
+## Blue Color Wheel SPIN (2026-09-19)
+
+The wheel rim can match the quit dialog color samples. Require OCR word QUIT
+and GAME or CANCEL before dismissing a quit dialog. A blue SPIN screenshot
+passes the wheel detector and fails quit detection. The 21-test suite covers
+this overlap; live verification cleared SPIN and resumed normal play.
+
+## Multiplier max: bounded observed cycling (2026-09-19)
+
+`get_multiplier()` used to accept only a single digit 1-3 and every
+`_multiplier_action()` call assumed x3 was the fixed, permanent cap. That
+assumption is gone: `get_multiplier()` now parses the full digit run as one
+number (rejecting anything outside 1..`MULTIPLIER_SANITY_MAX` (50) as
+unreadable OCR garbage rather than trusting it), and the actual cap is
+discovered live by `_probe_multiplier_max()`:
+
+- Taps the badge once, re-screenshots, and compares the new reading to the
+  highest value seen so far in this pass.
+- As long as it keeps climbing, the cap hasn't been reached - keep tapping.
+- The first tap that makes the reading go DOWN (wrap back toward x1) proves
+  the value seen right before that drop was the true cap. It then taps back
+  up exactly that many times to resettle there, and confirms it landed
+  correctly before returning success.
+- Bounded by `MULTIPLIER_MAX_PROBE_TAPS` (30) total taps so a persistent OCR
+  glitch that always reads "higher" can't tap forever - if that bound is
+  hit without ever observing a wrap, it just keeps the highest confirmed
+  reading rather than continuing to guess.
+- An unreadable badge (before the first tap, mid-probe, or during the
+  tap-back-to-max step) stops the probe immediately and returns "unknown"
+  (`None`) rather than tapping blind or guessing a value.
+- `_multiplier_probe_blocked()` re-checks every other known popup/dialog
+  detector (quit dialog, COLLECT, Pick a Box, bonus-roll, color wheel,
+  switch-opponent, match-3, raid, BUILD menu, any card/purchase-upsell
+  popup) before every single tap in the probe - unlike the rest of the
+  per-tick loop (which only checks these once per tick, before deciding
+  what to do), a probe pass can span several taps/screenshots of its own,
+  so it re-verifies nothing else appeared between them instead of trusting
+  a screen state read one or more taps ago. It never taps GO_BUTTON - only
+  ever `MULTIPLIER_BADGE`.
+- `_multiplier_action()` (used by both `cmd_multiplier` and the main loop)
+  caches the confirmed max in `_multiplier_cache` rather than reprobing
+  every tick (which would mean occasionally cycling all the way back down
+  to x1 and re-climbing just to re-confirm nothing changed). It only
+  reprobes when: no cap is cached yet, the live reading exceeds the cached
+  cap (a boosted event raised it), or `MULTIPLIER_REPROBE_TICKS` (~15min at
+  `interval_s=1.3`) have passed since the last probe - this last case is
+  what lets the loop pick up a mid-session cap increase (e.g. a
+  boosted-rewards event starting) that wouldn't otherwise be visible from
+  the current reading alone.
+- New CLI command `multiplier-max` runs one probe pass standalone (does not
+  read/write the loop's cache), for manual verification against a live
+  device without needing `loop` running.
+
+**Live verification (2026-09-19, real device, real taps, phone
+`0B191FDD4000Q2`):** ran `multiplier-max` against the live phone while the
+supervised `loop` was mid roll-empty-backoff (so nothing else was tapping
+the badge concurrently). Observed real output:
+
+```
+multiplier detected: 1 (raw OCR: '"x1') - probing for current max.
+after probe tap 1: multiplier = x2 (raw OCR: '"2')
+after probe tap 2: multiplier = x3 (raw OCR: '"3')
+after probe tap 3: multiplier = x1 (raw OCR: '"x1')
+Wrap-around detected (x3 -> x1); true max is x3. Tapping 2 more time(s) to return to it.
+Settled at observed max: x3.
+```
+
+A follow-up read-only check (`get_multiplier()`, no tap) confirmed the
+badge was left sitting at `x3`. This confirms the mechanism works
+end-to-end on the real device and that x3 remains the actual currently
+available cap as of this date - no live evidence of any currently-active
+event raising it further was observed or claimed.
+
+Regression suite: 43 tests (21 pre-existing + 22 new, in
+`MultiplierProbeTest`/`GetMultiplierParsingTest`/
+`MultiplierActionCacheTest`/`MultiplierMaxCommandTest`), all offline/mocked
+except the live spot-check above.
+
+## Third-party software license records
+
+Maintain a project-local `Third_party_licenses.md` following the format in
+`C:/projects/smos/Third_party_licenses.md`. For each third-party component,
+record its name, verified license (and version-specific exceptions), official
+source URL, and how this project uses it. Group related components under
+clear headings. Include libraries, SDKs, copied code, bundled tools and models;
+record optional components as optional rather than implying they are installed.
+
+Update the record when adding, upgrading, replacing or removing dependencies.
+Verify terms against the actual component/version; do not guess from a similar
+package name. Keep unresolved licensing questions explicit before distribution.
+Preserve upstream copyright notices and include license/NOTICE texts when
+required; a summary file does not replace those obligations. The project's own
+license does not override third-party rights or automatically relicense them.
+Keep proprietary source and credentials out of shared skill bundles and public
+artifacts. This convention does not change this project's existing license.
+
+Primary review: settle at the observed maximum before rolling, never add a
+post-probe tap from a stale reading, and stop on failed probes. A 30-tap
+bound does not establish a confirmed maximum. Changed readings trigger
+a fresh probe; OCR values above 1000 are rejected as implausible.
+
+## Multiplier OCR fallback (2026-09-20)
+The live x1 badge was read as xt by the original crop, blocking all rolls.
+If the primary crop has no digits, re-read a tighter glyph crop at 4x scale
+using color and a white-text mask. Require both complete x-number readings
+to agree; never substitute letters for digits. The original broad crop remains
+primary for larger multipliers. Uncertain reads still stop without blind taps.
+
+Reconnection check: an additional inner crop (700,1730,770,1778) excludes the animated x5 badge rim. Color and mask must still both return the same complete multiplier.
+
+Tap-loop follow-up: badge animations at 0.4 seconds yielded stale OCR. Wait 2 seconds after each multiplier tap. Prefer two complete matching color/mask reads over single OCR (live x1 was misread x4). A GO tap log is not proof of rolling: verify dice count, board movement or earnings changed.
+
+Current OCR rule (supersedes earlier fallback notes): only two full matching x-number reads may drive multiplier control. Remove loose-digit fallback entirely: it repeatedly read x1 as 4 after jail. Re-probes have a 60-second monotonic cooldown; during uncertain/cooldown states do not tap either badge or GO.
+
+## 2026-09-20: low-dice recovery and faster frame checks
+- Fixed a live false-empty result: 3/60 dice had 2.79% blue fill, below the old 3% threshold. A contiguous blue patch spanning three columns and three rows near the pill's left edge now counts as available; isolated blue noise does not.
+- Decode each screenshot once and reuse it across detectors. File replacement invalidates the frame and per-frame region OCR cache. Capture writes atomically with fast PNG compression.
+- Normal idle interval is 0.35s; animation-specific waits, multiplier consensus, 2s badge settling and 60s failed-probe cooldown remain.
+- During empty-dice backoff, recheck every 15s instead of 300s. The outer 2h window still exists but exits as soon as dice return.
+- Benchmark on the same captured board: ten repeated pixel detectors, median of five passes, 512.22ms before versus 6.43ms with the decoded frame cached (~80x). This excludes capture, OCR, input and game animation; it is not an end-to-end gameplay speedup.
+- Live verification: observed x3 maximum, actual roll reduced dice 3/60 to 0/60 and cash changed 768164 to 794864. No claim of a higher available multiplier. Other event paths covered by regression tests, not all replayed live.
+- 46 regression tests passed. Both live scripts match the workstation source. Rollback copies are under ~/.local/state/monopoly-speed-backup/ on the deployment host.
+Follow-up: check confirmed empty dice BEFORE multiplier verification. Zero-dice badge changes must not cause repeated cap probes. Regression suite now 47 tests, including no badge/GO taps while empty.
+
+## 2026-09-20: themed BUILD recovery
+The Little M's Room footer was readable while price OCR was garbled and the
+header pixel was teal. Detect a named city followed by valid 0..30/30 progress
+in the bottom footer as another BUILD signature. Keep event handlers first.
+Close recovery now confirms the menu before each bounded close attempt and
+refreshes the screen afterward. Dice backoff returns to rolling as soon as
+dice reappear, without first reopening BUILD. Build visits have a 30-second
+cooldown, at most two card rounds and a ten-second card-action budget; every
+card tap rechecks the menu so board completion cannot cause blind taps.
+52 regression tests pass. The saved failing live screen now detects as BUILD.
+
+## Purchase-loop guard (2026-09-22)
+Automatic play no longer opens the shop from its persistent notification badge.
+Detected orange-X purchase modals are handled before COLLECT, with two close-only
+attempts maximum until a non-modal frame is observed. Persistent offers pause
+for 15 seconds without taps. Unknown dimmed popups no longer receive blind center
+or fixed bottom-X taps; manual dismissal may be required. Reward chains stop
+when a detected purchase upsell appears. This does not prove detection of every
+future store design. Current regression suite: 56 tests. Live deployment observed
+normal board/empty-dice monitoring; purchase popup path tested offline only.
+
+2026-09-22 billing-screen follow-up (supersedes earlier live-test limitation):
+The observed Google Play sheet was cancelled with Android Back; the game confirmed cancellation. The Profit Herder offer's close button was above the old scan range. Expanded orange-X detection to y=230..550. Shape-detected reward buttons now require recognized COLLECT/CLAIM/GO text; prices and locked FREE offers are rejected. Every tap checks exact Monopoly foreground focus and fails closed if billing or an unknown window has focus. This is defense in depth, not a guarantee against every future store layout or a focus change between check and input.
+60 regression tests pass. Deployed scripts and workstation mirrors match SHA256 f74e95589aa1bddd327aed32717200294bfaae1e6226f8c5189ed911519a489f. Live automation closed the actual offer on its first close-only attempt, returned to the board with 0/60 dice, and runs as one loop. Earlier source backups retained beside deployed scripts. Preserve these guards; never restore blind popup taps.
+
+2026-09-22 full-log audit: reviewed all 12 logs; 70 regression tests pass locally and on Localnet. Removed residual blind popup taps from dice backoff; validated raw captures and portrait dimensions; isolated per-process frame/OCR files; continuous mode waits through disconnects and missing game focus rather than crashing. Failed BUILD closes have a 60s cooldown. All messages are timestamped with classified state intervals. A loop lock prevents duplicate automation. See LOG_AUDIT_20260922.md for counts, evidence and limitations. Deployed hash 08f2c31c201dd3a69b54b1f1f7ee652066c55f9e63a82e55b145b6a326b41fe8. Phone disconnected at deployment: one loop waiting safely; actual gameplay/reconnect still needs live verification. No blind unlock swipes: bring the unlocked game to foreground after reconnecting.
+
+## Live follow-up and navigation recovery (2026-09-22)
+The phone reconnected and the deployed loop resumed without a restart. Pick a Box was cleared live. Further inspection found an actual 1/60 pill whose blue fill occupied x376..379, y2157..2179, outside the former scanline. A contiguous 3-by-5 blue edge patch now recognizes this last die; saved 0/60 capture still returns zero. Bounded building during true dice waits is restored after event/dice checks, using existing visit budgets/cooldowns.
+Unknown dimmed popups now get at most two guarded Android Back attempts after a 15-second settling period; no blind center taps. Failed BUILD closes try one guarded Back before cooldown. Back requires exact game foreground and cannot operate on billing/other apps. These recovery paths do not authorize purchases or guarantee every future dialog is dismissible.
+74 tests pass on workstation and host. Deployed/source hash: 4665dcc855a933ad82e882decc0b079f28c4b1d17c262423625a7e9a4ec951b7. Live run recognized the saved last die, settled at observed x3, issued GO, opened BUILD, spent banked cash on upgrades and closed BUILD on the first attempt. Back-fallback paths are regression-tested; their live failure conditions were not artificially induced. Earlier disconnected-device verification limitation is resolved by actual automatic reconnect, but permanent hardware availability and future game UI compatibility cannot be guaranteed.
+
+Last-die multiplier correction: live game permitted selection of x3 with only 1 die, then reset to x1 on GO, causing the bot to probe x3 again. Confirmed rounded-edge last-die detection now selects x1 without a maximum probe. The live run then entered a raid and selected its target. 76 tests pass locally and on host; final hash 0ef49b4049bde0e3bb7a1301f6ef7fa0b2846428e17ff75976c65890f5c1059c. This supersedes the intermediate hashes above. Preserve maximum discovery for ordinary dice availability and the confirmed last-die x1 exception.
+
+## Quick Wins gift-box decisions (2026-09-23)
+1. On the unobstructed board, detect the red badge at the bottom-left WINS icon. Check during ordinary play AND dice backoff; do not require a roll-count tick threshold. Reopening has a five-minute monotonic cooldown.
+2. If already inside verified Quick Wins, resume its reward chain immediately. Recognize QUICK/WINS, MILESTONE REACHED, QUICK WIN COMPLETE, or the combined WEEKLY PRIZE/FILL THE BAR footer (stylized title OCR can be blank).
+3. On these verified screens, find a green button and require an exact normalized COLLECT, TAP TO CLAIM, CLAIM or GO label before tapping. A second inset crop excludes the button rim when OCR adds spurious letters. Reject prices, FREE, and unknown labels.
+4. Wait three seconds after a claim. Refresh and reverify; tolerate short animations with three additional checks. Claim up to twelve buttons per visit; never tap through an unverified screen. Verified Quick Wins precedes the broad orange-color purchase detector because celebration confetti can trigger it.
+5. When no verified claim remains, use guarded Android Back only if still inside verified Quick Wins. Return control to event handling, rolling or dice waiting. Actual purchase dialogs and unrelated screens are not part of this handler.
+6. On a disconnect, continuous mode keeps its existing safe reconnect behavior. Never interpret missing capture data as another claim target.
+
+79 regression tests pass on workstation and Localnet. Live claims verified the 2,770,000 cash milestone, a 20-dice reward and chained daily rewards. Source/live SHA256 d6b0e6a12c8c930e05de24cf71f7d9ff9f7b401711abcbdd48b27803e0a6e9f3. Workstation mirror synchronized. No purchase buttons were used.
+
+Quick Wins final live verification: all three daily tasks claimed, milestone/chain completed, gift badge cleared, returned to board. Dice increased 0/60 to 30/60; cash 264,544 to 3,727,544; event hammers 72 to 84. Fixed generic TSV fallback mistaking task text 'Collect 1 Sticker' for a button: COLLECT must stand alone on its OCR line. If guarded Back leaves the verified completed Wins page open, tap its observed close X (540,2245), never a guessed button outside that verified screen. 80 tests pass locally and on host. Final deployed/mirror hash 4dfebc5b6d8b04cfab314e7922640f0ce637b32e3654917302bfa0e02a02a2af supersedes the intermediate hash.
+
+## Treasure digging event (2026-09-23)
+Recognize LEVEL n/18 plus blue display case before generic popup, BUILD or roll handling, including during dice backoff. OCR the remaining hammer count; no tile tap if unreadable or zero. Detect compact blue-star connected components within the dig grid, refresh after every tile, and permit at most two attempts per tile per level. Current strategy chooses center-near tiles; it is not an optimal hidden-object solver. Recognize TREASURES FOUND and verify the COLLECT label. At zero hammers, guarded Back then verified event close returns to ordinary play. Tutorial was advanced manually from its highlighted tiles; automated tutorial parsing is not claimed.
+Live: first treasure uncovered with two hammers, level 1's 50-dice reward collected; level 2 grid (15 tiles) and remaining 82 hammers correctly detected. Handler deployed in both loop paths; 83 regression tests pass locally and on Localnet. Hash a2b61a5010da11f7dfb7f2b0577b6ab0fce6c1cba0639e588e12de0fc89891d4. Workstation mirror synchronized. Unknown future tile designs wait without blind taps.
+
+Treasure exit watchdog (2026-09-23): live level 5 introduced gold-star tiles the current blue-star detector did not recognize, exposing an unbounded wait. Exit now triggers at zero hammers, 45 seconds without a level/hammer-count change (including unreadable counts or a stuck reward), or a 10-minute visit limit. Exit taps only the verified event's observed close X, re-captures to confirm departure, and bounds close attempts to two before guarded Back and a 30-second retry cooldown. No automatic re-entry is added. Gold-star tile solving is not implemented by this fix; the watchdog returns to normal play instead of waiting indefinitely. 86 tests passed locally and on Localnet. Deployed hash 92c381d9c6fd75c2d7e001d36eb52cab3c81f2a5c4e0ed688c8df7ac67377bfb.
+
+## Productive mini-game play (2026-09-23)
+Supersedes the ten-minute treasure visit limit: continue while level or hammer count progresses. Leave at zero hammers or after 45 seconds without progress. Reinforced gold-star tiles now qualify only with a blue tile background; flood-fill keeps gold and blue components separate. Retry budget is two taps per tile/color/level, allowing reinforced tiles to change state. Existing purchase and foreground guards remain. 87 tests pass locally and on Localnet. Tutorial and event entry remain manual; this does not add support for every mini-game. Final source hash: 6ef39b0f5c61d3cbc6ac24ac014aee04e1b1570a47289226d49cad618e5b427c.
+
+Live gold-star verification: all four remaining reinforced tiles on level 5 were detected; automation completed the treasure and reached the 9,700,000 cash COLLECT reward. Generic verified reward handler claimed it. Productive play resumed with no manual tile taps.
+
+
+2026-09-23 Halloween house-choice recovery: the new event shield artwork falsely
+matched the broad purchase-X detector. A specific handler now precedes purchase
+handling in main and dice-wait loops. It requires a possessive Board title and
+multiple calibrated circular house targets; continues remaining targets within the
+same event, at most two attempts per position. Dim rings are recognized. Known
+event animations stay out of the purchase path; verified collect labels can be
+claimed. Exact game foreground guard remains. 91 tests pass locally and on host.
+Live choices earned 30 treats; one-time tutorial/shield-info prompts and final
+collect were manually advanced during validation. The bot then resumed ordinary
+reward collection and multiplier probing. Not a general minigame solver or a
+promise that unknown tutorial layouts are supported. Both live executables and
+python/localnet-bin mirror synchronized; rollback in ~/.local/state/monopoly-house-backup.
+
+
+2026-09-23 railroad Chance recovery: live Halloween CHANCE / HEAD TO THE NEAREST RAILROAD IF YOU DARE card blocked at 95/60 dice. Specific white-card geometry plus exact OCR now precedes generic popup/purchase handling in both loop paths; two guarded center taps maximum, retries reset only after unobstructed screen. Unknown/purchase text is rejected; existing purchase/focus protections remain. 93 tests passed on workstation and Localnet. Live first tap advanced to match-3, which completed and collected its reward automatically. Single loop verified. Source, localnet-bin and both installed scripts SHA256 87d6598c0eaf3ee716a78a11c380ec88357c69c3b3d984495996f03cf07a83f1. Backup: ~/.local/state/monopoly-chance-backup. This handles the verified railroad card, not all future Chance designs.
+
+Pi live follow-up: move badge/fallback BUILD visits before the next GO, after specific screen and empty-dice handling. Respect the existing visit cooldown and re-evaluate after every attempted visit; never roll from its pre-visit frame. The old post-GO visit raced roll animations and repeatedly failed to open BUILD. 101 regression tests pass, including ordering and failed-visit re-evaluation checks.
+
+2026-10-02 audit follow-up: multiplier OCR uses the cached decoded frame, caches its full two-read result only for that capture, and tries the last successful crop first while still requiring a new agreeing pair on each new image. Unknown-popup observation polls in 2 seconds before bounded navigation is exhausted, but first Back remains delayed at least 15 seconds and only two attempts are permitted. Optional MONOPOLY_METRICS reports capture/OCR timing each minute. Optional MONOPOLY_DIAGNOSTICS retains at most 12 screenshots, rate-limited by failure type to once per minute. Pi enables both. 105 regression tests pass. User ended the planned hour early once the game returned to GO with zero dice; future minigame-layout support is not claimed.
+
+2026-10-02 Pi Halloween title wrapping: long player names put Board on a second line. Keep original title read, then use the observed (190,200,650,315) text-only crop with PSM 6 if possessive Board validation fails. Still require multiple ring targets for entry and preserve bounded choices and foreground/purchase guards. 106 tests pass on Windows and Pi. Live first house choice advanced and awarded 9 treats; final completion verification in progress.
+Completion verified: house event returned to board; one-time Win Win tutorial manually advanced. Follow-up Spooky Express 40 dice collected automatically; board 61/60. No general tutorial handler added.
+
+2026-10-03 BUILD exclusion: a dice fraction plus at least two of WINS, ALBUM, FRIENDS in the footer identifies main board even when GO sparkles resemble BUILD card icons. Never let green-icon fallback override that main-board evidence. 107 tests pass. Pi user service remains manually started, active, with linger and restart-on-failure.
+
+## 2026-10-04 Monopoly side-free update deployment
+Deployed to rpi3 (jason user monopoly-assist.service), not the inactive localnet supervisor. All 113 tests passed on the Pi. Runtime SHA-256: 575399a13d09b62ce52bd269bf55d7d0ea281a750956b2bd18db6a28c3ad5266 (only ADB path adapted to /usr/bin/adb). Rollback: ~/.local/share/monopoly-assist/backups/20261004T210357Z. Confirmed active MainPID 155812 and exactly one assistant loop. Live screenshot showed the main board with zero dice and no side icon labeled FREE; actual free reward collection remains unverified. Initial staging encoding error was caught by tests and rolled back; corrected UTF-8 staging passed.
+
+
+## Blocks Boutique (2026-10-04)
+Observed through a 15-second ADB video and fresh 1080x2340 captures. Drag blocks
+from the drawer onto the 8x8 grid. Complete rows/columns to clear blocks and
+collect recipe materials. Each accepted placement uses one event token.
+The tutorial's 3x3 placement cleared three columns: materials 7 -> 4,
+tokens 13 -> 12. Two automated 2x3 placements then collected the remaining
+materials (4 -> 2 -> complete), tokens 12 -> 11 -> 10. RECIPE COMPLETE showed
+150 dice; its observed COLLECT control was pressed.
+
+The handler runs before generic popup/build/roll detection in both loops.
+Require bright RECIPE/MERCH ITEM book, four blue-frame anchors, known cell
+colors, readable token count and fully observed connected drawer shapes.
+Enumerate legal placements, prioritize collected materials and completed
+lines, then remaining piece mobility. Use the fresh piece bounding-box center;
+the calibrated destination places the ghost approximately 400px above the
+finger. Always recheck exact game foreground before DOWN/MOVE and release UP
+even on errors. After each drag, require predicted board and one-token reduction
+before further placement; unexpected outcomes pause for review. Completion
+animations/rewards pass to existing separately gated reward handling.
+
+Zero tokens uses guarded Back; never buy refills. Unclear shapes, unreadable
+cells/counts, changed layout, unchanged frame or failed placements pause rather
+than guessing. Initial rectangle support was extended to observed connected L/T shapes and
+material-bearing pieces; later mechanics remain unverified. 124 offline tests pass,
+including a real captured grid fixture and focus/release safety regressions.
+
+Follow-up: prize-cabinet NEXT is recognized before generic BUILD detection; live transition reached recipe 2 with 10 tokens. Two further predicted placements verified 10 -> 9 -> 8 tokens, including a T shape. See BOUTIQUE_WALKTHROUGH.md.
+
+
+## PAUSED by user: Blocks Boutique review (2026-10-04)
+User requested stopping this work and reviewing it later. Pi monopoly-assist.service
+was stopped for calibration and must remain stopped until work is resumed.
+The new handler is deployed; 124 tests passed on Pi and Windows, but autonomous
+execution is NOT fully verified. Recipe 1 completed and its 150-dice reward was
+collected. Recipe 2 reached 8 tokens with verified 2x2 and T-shaped placements.
+A later top-edge 2x3 placement failed without spending a token; the handler
+correctly paused on its unexpected outcome. Manual held-touch calibration also
+failed without spending. Latest screenshot still shows recipe 2 and 8 tokens.
+
+Review next: resolve drag-preview alignment, including grab point, piece scaling
+and vertical offset near the top edge. Do not blindly retry or change the 400px
+offset globally: earlier placements worked, while the latest held previews were
+red and overlapped existing cells. Consider recording the complete drag and
+verifying the legal preview BEFORE releasing a piece. Retain exact foreground,
+touch-release, predicted-outcome and no-purchase guards.
+
+Evidence: C:/scratch/monopoly-tutorial.mp4 (15 seconds),
+C:/scratch/boutique-held-fail.png, C:/scratch/boutique-held-corrected.png,
+C:/scratch/boutique-corrected.png. Source guide: BOUTIQUE_WALKTHROUGH.md.
+Runtime SHA256: 70a3e34c92154714d7394ece92933eb5c9a3c4ff1f67cd9bbf030371e39ca8bd.
+Rollback: ~/.local/share/monopoly-assist/backups/20261005T000905Z.
+Do not resume automatically or claim the mini-game is finished.
+
+## 2026-10-04 Normal assistant resumed
+User explicitly requested that the assistant remain usable and restart. Installed a default-off MONOPOLY_BOUTIQUE_AUTOPLAY gate: unfinished block placement requires explicit opt-in (value 1); a recognized Boutique board pauses for review. Existing normal board play, rewards and purchase guards remain active. 125 tests passed on Windows and Pi. Runtime SHA256 d9b66db63fd2fe4aea0d2cfe97320a1da572f6fb719adee97fd0124ba6988d15. Backup ~/.local/share/monopoly-assist/backups/20261005T002639Z. User service active PID 162661; live main board showed 159 dice and multiplier verification resumed. Earlier request to leave the whole service stopped is superseded; mini-game development remains deferred.
+
+## 2026-10-06 Monitoring updates: sparkles and Color Wheel
+
+Corrected false BUILD detection from GO sparkles with independent four-label
+board navigation and a text-only footer OCR fallback. A 15-second recording
+and five sequential captures produced 20 normal-board frames: old detector
+classified all 20 as BUILD; corrected detector classified none as BUILD.
+
+Live monitoring then exposed a genuine BUILD menu classified as Color Wheel
+from green scenery. Wheel handling now requires the complete event title,
+SPIN label, and a readable positive spins-left count. The current large title
+needs separate enlarged bright-letter masks for COLOR and WHEEL; complete
+words are required without guessed character repair. The real wheel capture
+is accepted; BUILD and normal-board captures are rejected. Price-bearing
+buttons and zero/unreadable counts remain blocked. Live free SPIN completed
+and returned to the board. Normal BUILD close, rolls, rewards, and Quick Wins
+were observed. Boutique autoplay remains default-off; unfinished/new layouts
+are not assumed supported.
+
+131 regression tests passed on Windows, rpi3, and LocalNet. Source, Windows
+localnet-bin mirror, and both LocalNet runtime copies match byte-for-byte;
+Pi differs only in the ADB executable path. Stage as UTF-8 with LF endings.
+Pi user service remains active; LocalNet fallback supervisor remains inactive.
+Backups: Pi ~/.local/share/monopoly-assist/backups/sparkle-fix-*,
+wheel-title-fix-20261006, wheel-layout-fix-20261006; LocalNet
+~/.local/state/monopoly-sync-backups/.
+
+Normalized source SHA256: 6b54037e3c7bf0fca357b36a590b3ff5c63d169493914256b0cf6ee9626df19e
+
+### Final follow-up after the 20-minute watch
+Confirmed-board navigation now short-circuits Color Wheel outlined-title OCR during multiplier checks. Live board classification measured 0.652s; the saved real wheel remained accepted and the saved BUILD menu rejected. 132 tests passed on all three hosts. Additional validation continued after the watch; Pi normal play remains active. Final normalized source SHA256: 48a1da7dabcc8900dbba3d13af788a86c213468ef4f136d1a2d7216d30c63821
